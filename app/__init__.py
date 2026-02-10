@@ -1,0 +1,1 @@
+# meshcore-dashboard application package

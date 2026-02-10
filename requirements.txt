@@ -1,0 +1,18 @@
+# MeshCore
+meshcore>=2.2.5
+
+# Web framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Database
+clickhouse-connect>=0.8.0
+
+# Config / utilities
+python-dotenv>=1.0.0
+pydantic-settings>=2.0.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+httpx>=0.27.0

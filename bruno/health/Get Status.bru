@@ -1,0 +1,27 @@
+meta {
+  name: Get Status
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{base_url}}/status
+  body: none
+  auth: none
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+  
+  test("status field is ok or degraded", function() {
+    expect(["ok", "degraded"]).to.include(res.body.status);
+  });
+  
+  test("clickhouse field present", function() {
+    expect(res.body.clickhouse).to.be.an("object");
+    expect(res.body.clickhouse).to.have.property("connected");
+    expect(res.body.clickhouse).to.have.property("latency_ms");
+  });
+}
