@@ -1,0 +1,48 @@
+meta {
+  name: Get Telemetry by Name
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{base_url}}/api/telemetry?repeater_name={{repeater_name}}
+  body: none
+  auth: none
+}
+
+params:query {
+  repeater_name: {{repeater_name}}
+}
+
+headers {
+  x-api-token: {{auth_token}}
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+  
+  test("envelope status is ok", function() {
+    expect(res.body.status).to.equal("ok");
+  });
+  
+  test("data object present", function() {
+    expect(res.body.data).to.be.an("object");
+  });
+  
+  test("data contains battery info", function() {
+    expect(res.body.data.battery).to.be.an("object");
+    expect(res.body.data.battery).to.have.property("mv");
+    expect(res.body.data.battery).to.have.property("v");
+    expect(res.body.data.battery).to.have.property("percentage");
+  });
+  
+  test("data contains uptime info", function() {
+    expect(res.body.data.uptime).to.be.an("object");
+  });
+  
+  test("data contains radio info", function() {
+    expect(res.body.data.radio).to.be.an("object");
+  });
+}

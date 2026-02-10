@@ -11,6 +11,7 @@ from fastapi import FastAPI
 
 from app.api.routes import auth as auth_router
 from app.api.routes import status as status_router
+from app.api.routes import telemetry as telemetry_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,3 +27,4 @@ app = FastAPI(
 # ── Routers ──────────────────────────────────────────────────────────────────
 app.include_router(status_router.router, tags=["health"])
 app.include_router(auth_router.router, tags=["auth"])
+app.include_router(telemetry_router.router, tags=["telemetry"])

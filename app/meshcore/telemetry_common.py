@@ -268,10 +268,69 @@ async def find_contact_by_name(
     return None
 
 
+async def find_contact_by_public_key(
+    meshcore, public_key: str, verbose=True, max_retries=5, debug=False
+):
+    """Find contact by public key (exact prefix match, case-insensitive) with retry logic."""
+    if verbose:
+        print(f"Searching for contact by public key: {public_key}")
+
+    public_key_lower = public_key.lower()
+
+    for attempt in range(max_retries):
+        result = await meshcore.commands.get_contacts()
+
+        if result is None:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(0.5)
+                continue
+            if verbose:
+                print("ERROR: Failed to get contacts after all retries")
+            return None
+
+        if result.type == EventType.ERROR:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(0.5)
+                continue
+            if verbose:
+                print(f"ERROR: Failed to get contacts: {result.payload}")
+            return None
+
+        contacts = result.payload
+        if not contacts:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(0.5)
+                continue
+            if verbose:
+                print("No contacts found on the device after all retries.")
+            return None
+
+        for contact_id, contact in contacts.items():
+            contact_pk = contact.get("public_key", "") or ""
+            if (
+                contact_pk.lower().startswith(public_key_lower)
+                or contact_pk.lower() == public_key_lower
+            ):
+                contact_name = contact.get("adv_name", "")
+                if verbose:
+                    print(f"✓ Found contact by public key: {contact_name}")
+                return {"id": contact_id, "data": contact, "name": contact_name}
+
+        if attempt < max_retries - 1:
+            await asyncio.sleep(0.5)
+            continue
+
+        if verbose:
+            print(f"ERROR: No contact found with public key '{public_key}'")
+        return None
+
+    return None
+
+
 async def get_status(meshcore, contact, password, verbose=True, max_retries=3):
     """Request and retrieve status from a contact with retry logic"""
 
-    login_success = await login_to_contact(meshcore, contact, password, verbose)
+    await login_to_contact(meshcore, contact, password, verbose)
 
     if verbose:
         print(f"\nRequesting status from {contact['name']}...")
@@ -323,7 +382,7 @@ async def get_status(meshcore, contact, password, verbose=True, max_retries=3):
             if result is None:
                 if attempt < max_retries - 1:
                     if verbose:
-                        print(f"No response received, retrying...")
+                        print("No response received, retrying...")
                     continue
                 else:
                     if verbose:
@@ -341,7 +400,7 @@ async def get_status(meshcore, contact, password, verbose=True, max_retries=3):
         except asyncio.TimeoutError:
             if attempt < max_retries - 1:
                 if verbose:
-                    print(f"Request timed out, retrying...")
+                    print("Request timed out, retrying...")
                 continue
             else:
                 if verbose:
@@ -367,7 +426,7 @@ def calculate_battery_percentage(bat_mv):
     return max(0, min(100, (bat_mv - 3200) / (4200 - 3200) * 100))
 
 
-def status_to_dict(status_data, contact_name=None):
+def status_to_dict(status_data, contact_name=None, public_key=None):
     """Convert status data to dictionary"""
     bat_mv = status_data.get("bat", 0)
     bat_v = bat_mv / 1000
@@ -420,6 +479,7 @@ def status_to_dict(status_data, contact_name=None):
             "tx": status_data.get("airtime", 0),
             "rx": status_data.get("rx_airtime", 0),
         },
+        "public_key": public_key,
         "pubkey_prefix": status_data.get("pubkey_pre", None),
     }
 

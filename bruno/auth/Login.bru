@@ -18,12 +18,12 @@ body:json {
 }
 
 script:post-response {
-  // Store the returned token in the environment so subsequent requests
-  // can reference it via {{auth_token}}.  The token is held in Bruno's
-  // in-memory environment only — it is never written to disk.
+  // Store the returned token so subsequent requests can reference it via
+  // {{auth_token}}.  bru.setVar keeps the value in memory for the duration
+  // of the Bruno session only — it is never written to disk.
   if (res.status === 200 && res.body.token) {
-    bru.setEnvVar("auth_token", res.body.token);
-    console.log("Token saved to env var auth_token");
+    bru.setVar("auth_token", res.body.token);
+    console.log("Token saved to collection var auth_token:", res.body.token);
   }
 }
 
