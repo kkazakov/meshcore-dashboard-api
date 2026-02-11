@@ -5,7 +5,7 @@ DELETE /api/channels — delete a channel by name (clears the slot on the device
 
 Authentication
 --------------
-Both endpoints require a valid ``x-api-token`` header obtained from
+All endpoints require a valid ``x-api-token`` header obtained from
 ``POST /api/login``.
 
 Each channel entry contains:
@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from app.api.deps import require_token
 from app.meshcore import telemetry_common
+from app.meshcore.connection import device_lock
 from meshcore import EventType
 
 logger = logging.getLogger(__name__)
@@ -121,51 +122,42 @@ async def get_channels(
 
     - **401** — invalid or missing ``x-api-token``.
     - **502** — device connection failed.
-
-    Example response:
-
-    ```json
-    {
-      "status": "ok",
-      "channels": [
-        { "index": 0, "name": "General", "secret_hex": "0a1b2c..." },
-        { "index": 1, "name": "Admin",   "secret_hex": "ff00aa..." }
-      ]
-    }
-    ```
     """
     config = telemetry_common.load_config()
     meshcore = None
 
-    try:
+    async with device_lock:
         try:
-            meshcore = await telemetry_common.connect_to_device(config, verbose=False)
-        except Exception as exc:
-            logger.error("Failed to connect to MeshCore device: %s", exc)
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "status": "error",
-                    "message": f"Device connection failed: {exc}",
-                },
-            ) from exc
-
-        channels = await _fetch_all_channels(meshcore)
-
-        if not channels:
-            logger.info("No channels found on the connected device")
-
-        return ChannelsResponse(
-            status="ok",
-            channels=[ChannelInfo(**ch) for ch in channels],
-        )
-
-    finally:
-        if meshcore:
             try:
-                await asyncio.wait_for(meshcore.disconnect(), timeout=5)
-            except Exception:
-                pass
+                meshcore = await telemetry_common.connect_to_device(
+                    config, verbose=False
+                )
+            except Exception as exc:
+                logger.error("Failed to connect to MeshCore device: %s", exc)
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "status": "error",
+                        "message": f"Device connection failed: {exc}",
+                    },
+                ) from exc
+
+            channels = await _fetch_all_channels(meshcore)
+
+            if not channels:
+                logger.info("No channels found on the connected device")
+
+            return ChannelsResponse(
+                status="ok",
+                channels=[ChannelInfo(**ch) for ch in channels],
+            )
+
+        finally:
+            if meshcore:
+                try:
+                    await asyncio.wait_for(meshcore.disconnect(), timeout=5)
+                except Exception:
+                    pass
 
 
 @router.post("/api/channels", response_model=ChannelsResponse, status_code=201)
@@ -185,24 +177,6 @@ async def create_channel(
     - **401** — invalid or missing ``x-api-token``.
     - **502** — device connection failed.
     - **504** — device did not acknowledge the write.
-
-    Example request:
-
-    ```json
-    { "name": "MyChannel" }
-    ```
-
-    Example response (201):
-
-    ```json
-    {
-      "status": "ok",
-      "channels": [
-        { "index": 0, "name": "General",   "secret_hex": "0a1b2c..." },
-        { "index": 1, "name": "MyChannel", "secret_hex": "ff00aa..." }
-      ]
-    }
-    ```
     """
     channel_name = payload.name.strip()
     if not channel_name:
@@ -214,113 +188,103 @@ async def create_channel(
     config = telemetry_common.load_config()
     meshcore = None
 
-    try:
+    async with device_lock:
         try:
-            meshcore = await telemetry_common.connect_to_device(config, verbose=False)
-        except Exception as exc:
-            logger.error("Failed to connect to MeshCore device: %s", exc)
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "status": "error",
-                    "message": f"Device connection failed: {exc}",
-                },
-            ) from exc
-
-        # Read all slots (initialised and raw) to find duplicates and free slots.
-        existing: list[dict[str, Any]] = []
-        free_slot: int | None = None
-
-        for idx in range(_MAX_CHANNEL_SLOTS):
             try:
-                event = await meshcore.commands.get_channel(idx)
+                meshcore = await telemetry_common.connect_to_device(
+                    config, verbose=False
+                )
             except Exception as exc:
-                logger.warning("Error fetching channel %d: %s", idx, exc)
-                break
-
-            if event is None or event.type == EventType.ERROR:
-                break
-
-            slot_payload = event.payload
-            secret_raw = slot_payload.get("channel_secret", b"")
-            secret_hex = (
-                secret_raw.hex()
-                if isinstance(secret_raw, (bytes, bytearray))
-                else str(secret_raw)
-            )
-            name = slot_payload.get("channel_name", "")
-
-            if _is_empty_slot(name, secret_hex):
-                # First uninitialised slot becomes the target
-                if free_slot is None:
-                    free_slot = idx
-                continue
-
-            # Duplicate name check (case-insensitive)
-            if name.lower() == channel_name.lower():
+                logger.error("Failed to connect to MeshCore device: %s", exc)
                 raise HTTPException(
-                    status_code=409,
+                    status_code=502,
                     detail={
                         "status": "error",
-                        "message": f"Channel '{name}' already exists at index {idx}",
+                        "message": f"Device connection failed: {exc}",
+                    },
+                ) from exc
+
+            # Read all slots to find duplicates and the first free slot.
+            free_slot: int | None = None
+
+            for idx in range(_MAX_CHANNEL_SLOTS):
+                try:
+                    event = await meshcore.commands.get_channel(idx)
+                except Exception as exc:
+                    logger.warning("Error fetching channel %d: %s", idx, exc)
+                    break
+
+                if event is None or event.type == EventType.ERROR:
+                    break
+
+                slot_payload = event.payload
+                secret_raw = slot_payload.get("channel_secret", b"")
+                secret_hex = (
+                    secret_raw.hex()
+                    if isinstance(secret_raw, (bytes, bytearray))
+                    else str(secret_raw)
+                )
+                name = slot_payload.get("channel_name", "")
+
+                if _is_empty_slot(name, secret_hex):
+                    if free_slot is None:
+                        free_slot = idx
+                    continue
+
+                if name.lower() == channel_name.lower():
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "status": "error",
+                            "message": f"Channel '{name}' already exists at index {idx}",
+                        },
+                    )
+
+            if free_slot is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "status": "error",
+                        "message": "No free channel slot available (all 8 slots are occupied)",
                     },
                 )
 
-            existing.append(
-                {
-                    "index": slot_payload.get("channel_idx", idx),
-                    "name": name,
-                    "secret_hex": secret_hex,
-                }
-            )
-
-        if free_slot is None:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "status": "error",
-                    "message": "No free channel slot available (all 8 slots are occupied)",
-                },
-            )
-
-        # Write the new channel — secret auto-derived from name by the library
-        logger.info("Creating channel '%s' at slot %d", channel_name, free_slot)
-        try:
-            result = await meshcore.commands.set_channel(free_slot, channel_name)
-        except Exception as exc:
-            logger.error("set_channel failed: %s", exc)
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "status": "error",
-                    "message": f"Failed to write channel: {exc}",
-                },
-            ) from exc
-
-        if result is None or result.type == EventType.ERROR:
-            err_msg = result.payload if result else "no response"
-            raise HTTPException(
-                status_code=504,
-                detail={
-                    "status": "error",
-                    "message": f"Device did not acknowledge channel creation: {err_msg}",
-                },
-            )
-
-        # Re-read the full channel list so the response reflects device state
-        channels = await _fetch_all_channels(meshcore)
-
-        return ChannelsResponse(
-            status="ok",
-            channels=[ChannelInfo(**ch) for ch in channels],
-        )
-
-    finally:
-        if meshcore:
+            logger.info("Creating channel '%s' at slot %d", channel_name, free_slot)
             try:
-                await asyncio.wait_for(meshcore.disconnect(), timeout=5)
-            except Exception:
-                pass
+                result = await meshcore.commands.set_channel(free_slot, channel_name)
+            except Exception as exc:
+                logger.error("set_channel failed: %s", exc)
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "status": "error",
+                        "message": f"Failed to write channel: {exc}",
+                    },
+                ) from exc
+
+            if result is None or result.type == EventType.ERROR:
+                err_msg = result.payload if result else "no response"
+                raise HTTPException(
+                    status_code=504,
+                    detail={
+                        "status": "error",
+                        "message": f"Device did not acknowledge channel creation: {err_msg}",
+                    },
+                )
+
+            channels = await _fetch_all_channels(meshcore)
+
+            return ChannelsResponse(
+                status="ok",
+                channels=[ChannelInfo(**ch) for ch in channels],
+            )
+
+        finally:
+            if meshcore:
+                try:
+                    await asyncio.wait_for(meshcore.disconnect(), timeout=5)
+                except Exception:
+                    pass
 
 
 @router.delete("/api/channels", response_model=ChannelsResponse)
@@ -339,23 +303,6 @@ async def delete_channel(
     - **401** — invalid or missing ``x-api-token``.
     - **502** — device connection failed or write was rejected.
     - **504** — device did not acknowledge the delete.
-
-    Example request:
-
-    ```json
-    { "name": "MyChannel" }
-    ```
-
-    Example response (200):
-
-    ```json
-    {
-      "status": "ok",
-      "channels": [
-        { "index": 0, "name": "General", "secret_hex": "0a1b2c..." }
-      ]
-    }
-    ```
     """
     channel_name = payload.name.strip()
     if not channel_name:
@@ -367,95 +314,94 @@ async def delete_channel(
     config = telemetry_common.load_config()
     meshcore = None
 
-    try:
+    async with device_lock:
         try:
-            meshcore = await telemetry_common.connect_to_device(config, verbose=False)
-        except Exception as exc:
-            logger.error("Failed to connect to MeshCore device: %s", exc)
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "status": "error",
-                    "message": f"Device connection failed: {exc}",
-                },
-            ) from exc
-
-        # Scan all slots to find the one matching the requested name
-        target_idx: int | None = None
-
-        for idx in range(_MAX_CHANNEL_SLOTS):
             try:
-                event = await meshcore.commands.get_channel(idx)
+                meshcore = await telemetry_common.connect_to_device(
+                    config, verbose=False
+                )
             except Exception as exc:
-                logger.warning("Error fetching channel %d: %s", idx, exc)
-                break
+                logger.error("Failed to connect to MeshCore device: %s", exc)
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "status": "error",
+                        "message": f"Device connection failed: {exc}",
+                    },
+                ) from exc
 
-            if event is None or event.type == EventType.ERROR:
-                break
+            target_idx: int | None = None
 
-            slot_payload = event.payload
-            secret_raw = slot_payload.get("channel_secret", b"")
-            secret_hex = (
-                secret_raw.hex()
-                if isinstance(secret_raw, (bytes, bytearray))
-                else str(secret_raw)
-            )
-            name = slot_payload.get("channel_name", "")
+            for idx in range(_MAX_CHANNEL_SLOTS):
+                try:
+                    event = await meshcore.commands.get_channel(idx)
+                except Exception as exc:
+                    logger.warning("Error fetching channel %d: %s", idx, exc)
+                    break
 
-            if _is_empty_slot(name, secret_hex):
-                continue
+                if event is None or event.type == EventType.ERROR:
+                    break
 
-            if name.lower() == channel_name.lower():
-                target_idx = idx
-                break
+                slot_payload = event.payload
+                secret_raw = slot_payload.get("channel_secret", b"")
+                secret_hex = (
+                    secret_raw.hex()
+                    if isinstance(secret_raw, (bytes, bytearray))
+                    else str(secret_raw)
+                )
+                name = slot_payload.get("channel_name", "")
 
-        if target_idx is None:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "status": "error",
-                    "message": f"Channel '{channel_name}' not found",
-                },
-            )
+                if _is_empty_slot(name, secret_hex):
+                    continue
 
-        # Clear the slot: empty name + explicit all-zero secret bypasses
-        # the auto-derive path inside set_channel
-        logger.info("Deleting channel '%s' at slot %d", channel_name, target_idx)
-        try:
-            result = await meshcore.commands.set_channel(
-                target_idx, "", channel_secret=b"\x00" * 16
-            )
-        except Exception as exc:
-            logger.error("set_channel (clear) failed: %s", exc)
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "status": "error",
-                    "message": f"Failed to clear channel slot: {exc}",
-                },
-            ) from exc
+                if name.lower() == channel_name.lower():
+                    target_idx = idx
+                    break
 
-        if result is None or result.type == EventType.ERROR:
-            err_msg = result.payload if result else "no response"
-            raise HTTPException(
-                status_code=504,
-                detail={
-                    "status": "error",
-                    "message": f"Device did not acknowledge channel deletion: {err_msg}",
-                },
-            )
+            if target_idx is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "status": "error",
+                        "message": f"Channel '{channel_name}' not found",
+                    },
+                )
 
-        # Return the updated channel list (deleted channel will no longer appear)
-        channels = await _fetch_all_channels(meshcore)
-
-        return ChannelsResponse(
-            status="ok",
-            channels=[ChannelInfo(**ch) for ch in channels],
-        )
-
-    finally:
-        if meshcore:
+            logger.info("Deleting channel '%s' at slot %d", channel_name, target_idx)
             try:
-                await asyncio.wait_for(meshcore.disconnect(), timeout=5)
-            except Exception:
-                pass
+                result = await meshcore.commands.set_channel(
+                    target_idx, "", channel_secret=b"\x00" * 16
+                )
+            except Exception as exc:
+                logger.error("set_channel (clear) failed: %s", exc)
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "status": "error",
+                        "message": f"Failed to clear channel slot: {exc}",
+                    },
+                ) from exc
+
+            if result is None or result.type == EventType.ERROR:
+                err_msg = result.payload if result else "no response"
+                raise HTTPException(
+                    status_code=504,
+                    detail={
+                        "status": "error",
+                        "message": f"Device did not acknowledge channel deletion: {err_msg}",
+                    },
+                )
+
+            channels = await _fetch_all_channels(meshcore)
+
+            return ChannelsResponse(
+                status="ok",
+                channels=[ChannelInfo(**ch) for ch in channels],
+            )
+
+        finally:
+            if meshcore:
+                try:
+                    await asyncio.wait_for(meshcore.disconnect(), timeout=5)
+                except Exception:
+                    pass

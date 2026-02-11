@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from app.api.deps import require_token
 from app.meshcore import telemetry_common
+from app.meshcore.connection import device_lock
 
 logger = logging.getLogger(__name__)
 
@@ -79,67 +80,70 @@ async def get_telemetry(
     config = telemetry_common.load_config()
     meshcore = None
 
-    try:
+    async with device_lock:
         try:
-            meshcore = await telemetry_common.connect_to_device(config, verbose=False)
-        except Exception as exc:
-            logger.error("Failed to connect to MeshCore device: %s", exc)
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "status": "error",
-                    "message": f"Device connection failed: {exc}",
-                },
-            ) from exc
-
-        # Resolve contact — prefer name, fall back to public key
-        contact = None
-        if repeater_name:
-            contact = await telemetry_common.find_contact_by_name(
-                meshcore, repeater_name, verbose=False, debug=False
-            )
-        if contact is None and public_key:
-            contact = await telemetry_common.find_contact_by_public_key(
-                meshcore, public_key, verbose=False, debug=False
-            )
-
-        if contact is None:
-            identifier = repeater_name or public_key
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "status": "error",
-                    "message": f"Contact '{identifier}' not found",
-                },
-            )
-
-        status_data = await telemetry_common.get_status(
-            meshcore,
-            contact,
-            password or "",
-            verbose=False,
-            max_retries=3,
-        )
-
-        if status_data is None:
-            raise HTTPException(
-                status_code=504,
-                detail={
-                    "status": "error",
-                    "message": "No status response received — device may be offline or out of range",
-                },
-            )
-
-        result = telemetry_common.status_to_dict(
-            status_data,
-            contact_name=contact["name"],
-            public_key=contact["data"].get("public_key"),
-        )
-        return TelemetryResponse(status="ok", data=result)
-
-    finally:
-        if meshcore:
             try:
-                await asyncio.wait_for(meshcore.disconnect(), timeout=5)
-            except Exception:
-                pass
+                meshcore = await telemetry_common.connect_to_device(
+                    config, verbose=False
+                )
+            except Exception as exc:
+                logger.error("Failed to connect to MeshCore device: %s", exc)
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "status": "error",
+                        "message": f"Device connection failed: {exc}",
+                    },
+                ) from exc
+
+            # Resolve contact — prefer name, fall back to public key
+            contact = None
+            if repeater_name:
+                contact = await telemetry_common.find_contact_by_name(
+                    meshcore, repeater_name, verbose=False, debug=False
+                )
+            if contact is None and public_key:
+                contact = await telemetry_common.find_contact_by_public_key(
+                    meshcore, public_key, verbose=False, debug=False
+                )
+
+            if contact is None:
+                identifier = repeater_name or public_key
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "status": "error",
+                        "message": f"Contact '{identifier}' not found",
+                    },
+                )
+
+            status_data = await telemetry_common.get_status(
+                meshcore,
+                contact,
+                password or "",
+                verbose=False,
+                max_retries=3,
+            )
+
+            if status_data is None:
+                raise HTTPException(
+                    status_code=504,
+                    detail={
+                        "status": "error",
+                        "message": "No status response received — device may be offline or out of range",
+                    },
+                )
+
+            result = telemetry_common.status_to_dict(
+                status_data,
+                contact_name=contact["name"],
+                public_key=contact["data"].get("public_key"),
+            )
+            return TelemetryResponse(status="ok", data=result)
+
+        finally:
+            if meshcore:
+                try:
+                    await asyncio.wait_for(meshcore.disconnect(), timeout=5)
+                except Exception:
+                    pass
