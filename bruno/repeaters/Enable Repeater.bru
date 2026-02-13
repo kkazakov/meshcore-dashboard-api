@@ -14,6 +14,10 @@ headers {
   x-api-token: {{auth_token}}
 }
 
+vars:pre-request {
+  repeater_id: 70218b23-32ff-47dc-a1e1-452b58155674
+}
+
 tests {
   test("status 200", function() {
     expect(res.status).to.equal(200);

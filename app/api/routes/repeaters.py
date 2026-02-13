@@ -54,7 +54,7 @@ def list_repeaters(_email: str = Depends(require_token)) -> RepeaterListResponse
     client = get_client()
     result = client.query(
         "SELECT id, name, public_key, enabled, created_at "
-        "FROM repeaters "
+        "FROM repeaters FINAL "
         "ORDER BY created_at DESC"
     )
 
@@ -91,7 +91,7 @@ def add_repeater(
     client = get_client()
 
     existing = client.query(
-        "SELECT id FROM repeaters WHERE public_key = {pk:String}",
+        "SELECT id FROM repeaters FINAL WHERE public_key = {pk:String}",
         parameters={"pk": data.public_key.strip()},
     )
     if existing.result_rows:
@@ -146,7 +146,7 @@ def delete_repeater(
     client = get_client()
 
     existing = client.query(
-        "SELECT id FROM repeaters WHERE id = {rid:UUID}",
+        "SELECT id FROM repeaters FINAL WHERE id = {rid:UUID}",
         parameters={"rid": repeater_id},
     )
     if not existing.result_rows:
@@ -177,7 +177,7 @@ def enable_repeater(
     client = get_client()
 
     existing = client.query(
-        "SELECT id, name FROM repeaters WHERE id = {rid:UUID}",
+        "SELECT id, name, public_key, password FROM repeaters FINAL WHERE id = {rid:UUID}",
         parameters={"rid": repeater_id},
     )
     if not existing.result_rows:
@@ -185,11 +185,11 @@ def enable_repeater(
 
     now = datetime.now(timezone.utc)
     row = existing.result_rows[0]
-    name = row[1]
+    name, public_key, password = row[1], row[2], row[3]
 
     client.insert(
         "repeaters",
-        [[repeater_id, name, "", "", True, now]],
+        [[repeater_id, name, public_key, password, True, now]],
         column_names=["id", "name", "public_key", "password", "enabled", "created_at"],
     )
 
@@ -213,7 +213,7 @@ def disable_repeater(
     client = get_client()
 
     existing = client.query(
-        "SELECT id, name FROM repeaters WHERE id = {rid:UUID}",
+        "SELECT id, name, public_key, password FROM repeaters FINAL WHERE id = {rid:UUID}",
         parameters={"rid": repeater_id},
     )
     if not existing.result_rows:
@@ -221,11 +221,11 @@ def disable_repeater(
 
     now = datetime.now(timezone.utc)
     row = existing.result_rows[0]
-    name = row[1]
+    name, public_key, password = row[1], row[2], row[3]
 
     client.insert(
         "repeaters",
-        [[repeater_id, name, "", "", False, now]],
+        [[repeater_id, name, public_key, password, False, now]],
         column_names=["id", "name", "public_key", "password", "enabled", "created_at"],
     )
 

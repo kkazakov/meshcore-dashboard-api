@@ -35,7 +35,7 @@ def _get_enabled_repeaters() -> Sequence[tuple[str, str, str, str]]:
     client = get_client()
     result = client.query(
         "SELECT id, name, public_key, password "
-        "FROM repeaters "
+        "FROM repeaters FINAL "
         "WHERE enabled = true "
         "ORDER BY name"
     )
