@@ -10,6 +10,10 @@ get {
   auth: none
 }
 
+headers {
+  x-api-token: {{auth_token}}
+}
+
 tests {
   test("status 200", function() {
     expect(res.status).to.equal(200);
