@@ -202,6 +202,95 @@ Returns `404` if the channel name is not found.
 
 ---
 
+### Messaging — Messages
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/messages` | x-api-token | Send a message to a channel on the device |
+| `GET` | `/api/messages` | x-api-token | Fetch stored messages from ClickHouse |
+
+#### POST /api/messages — send a message
+
+Transmits a text message to a named channel on the connected MeshCore device.
+
+**Request**
+```json
+{ "channel": "#Public", "message": "Hello mesh!" }
+```
+
+The `channel` field accepts names with or without a leading `#` (`"Public"` and `"#Public"` are equivalent). Matching against channels on the device is case-insensitive.
+
+**Response**
+```json
+{ "status": "ok", "channel_index": 0, "channel_name": "Public" }
+```
+
+| Code | Reason |
+|---|---|
+| `200` | Message transmitted |
+| `400` | Empty channel or message |
+| `401` | Missing / invalid token |
+| `404` | Channel not found on device |
+| `502` | Device connection failed or rejected the send |
+| `504` | Device did not acknowledge within timeout |
+
+---
+
+#### GET /api/messages — fetch stored messages
+
+Reads messages for a given channel from ClickHouse. Two mutually exclusive modes:
+
+**Mode 1 — offset pagination**
+
+```
+GET /api/messages?channel=Public&from=0&limit=100
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `channel` | *(required)* | Channel name (with or without `#`) |
+| `from` | `0` | Row offset |
+| `limit` | `100` | Number of rows to return (max `1000`) |
+
+**Mode 2 — time-based (since)**
+
+```
+GET /api/messages?channel=Public&since=2026-02-10%2018:59:07.541
+```
+
+| Parameter | Description |
+|---|---|
+| `channel` | *(required)* Channel name |
+| `since` | ISO-8601 datetime — returns all messages received at or after this timestamp up to now |
+
+`from` and `since` are mutually exclusive; supplying both returns `400`.
+
+**Response**
+```json
+{
+  "channel": "Public",
+  "count": 1,
+  "messages": [
+    {
+      "ts": "2026-02-10T18:59:07.541000Z",
+      "sender": "Alice",
+      "hops": 1,
+      "text": "Hello mesh!"
+    }
+  ]
+}
+```
+
+| Code | Reason |
+|---|---|
+| `200` | Success |
+| `400` | Empty channel, invalid `since`, or both `from` and `since` supplied |
+| `401` | Missing / invalid token |
+| `422` | `channel` parameter not provided |
+| `503` | ClickHouse unavailable |
+
+---
+
 ## Background Workers
 
 ### Message Poller (`app/workers/message_poller.py`)

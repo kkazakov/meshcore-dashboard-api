@@ -1,0 +1,60 @@
+meta {
+  name: Get Messages (#test, since)
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{base_url}}/api/messages?channel=%23test&since=2026-02-10 18:59:07.541&order=asc
+  body: none
+  auth: none
+}
+
+params:query {
+  channel: "#test"
+  since: 2026-02-10 18:59:07.541
+  order: asc
+}
+
+headers {
+  x-api-token: {{auth_token}}
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+
+  test("channel field matches request", function() {
+    expect(res.body.channel).to.equal("#test");
+  });
+
+  test("count is a non-negative integer", function() {
+    expect(res.body.count).to.be.a("number");
+    expect(res.body.count).to.be.at.least(0);
+  });
+
+  test("messages is an array", function() {
+    expect(res.body.messages).to.be.an("array");
+  });
+
+  test("count matches messages array length", function() {
+    expect(res.body.count).to.equal(res.body.messages.length);
+  });
+
+  test("all messages are at or after the since timestamp", function() {
+    const since = new Date("2026-02-10T18:59:07.541Z");
+    res.body.messages.forEach(function(msg) {
+      expect(new Date(msg.ts).getTime()).to.be.at.least(since.getTime());
+    });
+  });
+
+  test("each message has required fields", function() {
+    res.body.messages.forEach(function(msg) {
+      expect(msg).to.have.property("ts");
+      expect(msg).to.have.property("sender");
+      expect(msg).to.have.property("hops");
+      expect(msg).to.have.property("text");
+    });
+  });
+}

@@ -1,6 +1,9 @@
 """
-POST /api/messages — send a text message to a named channel on the connected
-MeshCore companion device.
+Messages endpoints.
+
+POST /api/messages
+------------------
+Send a text message to a named channel on the connected MeshCore companion device.
 
 Authentication
 --------------
@@ -21,15 +24,41 @@ Responses
 - **404** — no channel with the given name exists on the device.
 - **502** — device connection failed or send was rejected.
 - **504** — device did not acknowledge the send within the timeout.
+
+GET /api/messages
+-----------------
+Fetch stored messages from ClickHouse for a given channel.
+
+Query parameters
+----------------
+``channel``  : (required) channel name to filter on.
+``from``     : (optional, int, default 0) offset for pagination; returns up to
+               ``limit`` messages starting at this offset, ordered by
+               ``received_at`` ascending.
+``limit``    : (optional, int, default 100, max 1000) number of messages to
+               return when using offset-based pagination.
+``since``    : (optional, ISO-8601 datetime) return all messages received at or
+               after this timestamp up to now. Mutually exclusive with ``from``.
+
+Responses
+---------
+- **200** — list of matching messages.
+- **400** — ``channel`` is empty, both ``from`` and ``since`` supplied, or
+            ``since`` cannot be parsed.
+- **401** — invalid or missing ``x-api-token``.
+- **503** — ClickHouse unavailable.
 """
 
 import asyncio
 import logging
+from datetime import datetime
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.api.deps import require_token
+from app.db.clickhouse import get_client
 from app.meshcore import telemetry_common
 from app.meshcore.connection import device_lock
 from meshcore import EventType
@@ -54,6 +83,19 @@ class SendMessageResponse(BaseModel):
     status: str
     channel_index: int
     channel_name: str
+
+
+class MessageRecord(BaseModel):
+    ts: datetime
+    sender: str
+    hops: int
+    text: str
+
+
+class GetMessagesResponse(BaseModel):
+    channel: str
+    count: int
+    messages: list[MessageRecord]
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -217,3 +259,131 @@ async def send_message(
                     await asyncio.wait_for(meshcore.disconnect(), timeout=5)
                 except Exception:
                     pass
+
+
+# ── GET /api/messages ─────────────────────────────────────────────────────────
+
+_COLUMNS = (
+    "received_at",
+    "sender_name",
+    "path_len",
+    "text",
+)
+
+
+@router.get("/api/messages", response_model=GetMessagesResponse)
+def get_messages(
+    channel: str = Query(..., description="Channel name to filter on"),
+    from_offset: int = Query(
+        default=0,
+        alias="from",
+        ge=0,
+        description="Row offset for pagination (mutually exclusive with 'since')",
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=1000,
+        description="Maximum number of messages to return (used with 'from')",
+    ),
+    since: str | None = Query(
+        default=None,
+        description="ISO-8601 datetime; return messages received at or after this timestamp",
+    ),
+    order: Literal["asc", "desc"] = Query(
+        default="asc",
+        description="Sort order for messages by received_at: 'asc' (oldest first) or 'desc' (newest first)",
+    ),
+    _email: str = Depends(require_token),
+) -> GetMessagesResponse:
+    """
+    Fetch stored channel messages from ClickHouse.
+
+    Two modes:
+
+    * **Offset pagination** — supply ``from`` (and optionally ``limit``).
+      Returns up to ``limit`` messages starting at the given row offset,
+      ordered by ``received_at`` ascending.
+
+    * **Time-based** — supply ``since`` (ISO-8601 datetime, e.g.
+      ``2026-02-10 18:59:07.541``).  Returns all messages received from that
+      timestamp up to now, ordered by ``received_at`` ascending.
+
+    ``from`` and ``since`` are mutually exclusive; supplying both returns 400.
+    """
+    channel_name = channel.strip()
+    if not channel_name:
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "message": "channel must not be empty"},
+        )
+
+    # Validate mutual exclusivity: if the caller explicitly passed `from` > 0
+    # alongside `since`, that is a conflict.  (from_offset == 0 is the default
+    # so we only treat it as an explicit "from" when since is absent.)
+    if since is not None and from_offset != 0:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "error",
+                "message": "'from' and 'since' are mutually exclusive",
+            },
+        )
+
+    col_list = ", ".join(_COLUMNS)
+    order_dir = order.upper()
+
+    if since is not None:
+        # Parse the timestamp supplied by the caller.
+        try:
+            since_dt = datetime.fromisoformat(since)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "error",
+                    "message": f"Invalid 'since' timestamp: {exc}",
+                },
+            ) from exc
+
+        sql = (
+            f"SELECT {col_list} FROM messages FINAL "
+            "WHERE channel_name = {channel_name:String} "
+            "AND received_at >= {since_dt:DateTime64(3)} "
+            f"ORDER BY received_at {order_dir}"
+        )
+        params: dict = {"channel_name": channel_name, "since_dt": since_dt}
+    else:
+        sql = (
+            f"SELECT {col_list} FROM messages FINAL "
+            "WHERE channel_name = {channel_name:String} "
+            f"ORDER BY received_at {order_dir} "
+            "LIMIT {limit:UInt32} OFFSET {offset:UInt32}"
+        )
+        params = {
+            "channel_name": channel_name,
+            "limit": limit,
+            "offset": from_offset,
+        }
+
+    try:
+        client = get_client()
+        result = client.query(sql, parameters=params)
+    except Exception as exc:
+        logger.error("ClickHouse query failed in get_messages: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "error", "message": "Database unavailable"},
+        ) from exc
+
+    records: list[MessageRecord] = []
+    for received_at, sender_name, path_len, text in result.result_rows:
+        records.append(
+            MessageRecord(ts=received_at, sender=sender_name, hops=path_len, text=text)
+        )
+
+    return GetMessagesResponse(
+        channel=channel_name,
+        count=len(records),
+        messages=records,
+    )

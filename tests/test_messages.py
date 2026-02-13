@@ -1,8 +1,9 @@
 """
-Tests for POST /api/messages endpoint.
+Tests for POST /api/messages and GET /api/messages endpoints.
 """
 
 import asyncio
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -73,7 +74,9 @@ def _build_meshcore_mock(channels: list[tuple[int, str]]) -> MagicMock:
 
 def test_send_message_missing_token_returns_401():
     """Requests without x-api-token are rejected with 401."""
-    response = client.post("/api/messages", json={"channel": "#test", "message": "hello"})
+    response = client.post(
+        "/api/messages", json={"channel": "#test", "message": "hello"}
+    )
     assert response.status_code == 401
 
 
@@ -370,3 +373,375 @@ def test_send_message_device_send_timeout_returns_504():
 
     assert response.status_code == 504
     assert "timeout" in response.json()["detail"]["message"].lower()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET /api/messages
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Column order must match _COLUMNS in app/api/routes/messages.py
+_COLUMNS = (
+    "received_at",
+    "sender_name",
+    "path_len",
+    "text",
+)
+
+
+def _make_row(
+    text: str = "hello",
+    sender_name: str = "Alice",
+    received_at: datetime | None = None,
+    path_len: int = 1,
+) -> tuple:
+    """Return a fake ClickHouse result row with sensible defaults."""
+    if received_at is None:
+        received_at = datetime(2026, 2, 10, 18, 59, 7, 541000, tzinfo=timezone.utc)
+    return (
+        received_at,  # received_at → ts
+        sender_name,  # sender_name → sender
+        path_len,  # path_len
+        text,  # text
+    )
+
+
+def _make_ch_result(rows: list[tuple]) -> MagicMock:
+    """Build a mock ClickHouse query result."""
+    result = MagicMock()
+    result.result_rows = rows
+    return result
+
+
+# ── Auth guard ────────────────────────────────────────────────────────────────
+
+
+def test_get_messages_missing_token_returns_401():
+    """GET /api/messages without x-api-token returns 401."""
+    response = client.get("/api/messages", params={"channel": "Public"})
+    assert response.status_code == 401
+
+
+def test_get_messages_invalid_token_returns_401():
+    """GET /api/messages with an unknown token returns 401."""
+    response = client.get(
+        "/api/messages",
+        params={"channel": "Public"},
+        headers={"x-api-token": "bad-token"},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"]["status"] == "unauthorized"
+
+
+# ── Input validation ──────────────────────────────────────────────────────────
+
+
+def test_get_messages_missing_channel_returns_422():
+    """channel is a required query parameter; omitting it returns 422."""
+    _install_token()
+    try:
+        response = client.get(
+            "/api/messages",
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+        assert response.status_code == 422
+    finally:
+        _remove_token()
+
+
+def test_get_messages_empty_channel_returns_400():
+    """An empty channel string returns 400."""
+    _install_token()
+    try:
+        response = client.get(
+            "/api/messages",
+            params={"channel": ""},
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+        assert response.status_code == 400
+        assert "channel" in response.json()["detail"]["message"]
+    finally:
+        _remove_token()
+
+
+def test_get_messages_from_and_since_mutually_exclusive_returns_400():
+    """Supplying both 'from' and 'since' returns 400."""
+    _install_token()
+    try:
+        response = client.get(
+            "/api/messages",
+            params={
+                "channel": "Public",
+                "from": 5,
+                "since": "2026-02-10 18:59:07.541",
+            },
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+        assert response.status_code == 400
+        assert "mutually exclusive" in response.json()["detail"]["message"]
+    finally:
+        _remove_token()
+
+
+def test_get_messages_invalid_since_returns_400():
+    """A malformed 'since' value returns 400."""
+    _install_token()
+    try:
+        with patch("app.api.routes.messages.get_client"):
+            response = client.get(
+                "/api/messages",
+                params={"channel": "Public", "since": "not-a-date"},
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        assert response.status_code == 400
+        assert "since" in response.json()["detail"]["message"].lower()
+    finally:
+        _remove_token()
+
+
+# ── Happy path — offset pagination ───────────────────────────────────────────
+
+
+def test_get_messages_offset_pagination_returns_messages():
+    """GET /api/messages?channel=Public&from=0&limit=100 returns rows from ClickHouse."""
+    _install_token()
+    rows = [_make_row(f"msg {i}") for i in range(3)]
+    ch_result = _make_ch_result(rows)
+
+    with patch("app.api.routes.messages.get_client") as mock_get_client:
+        mock_get_client.return_value.query.return_value = ch_result
+        try:
+            response = client.get(
+                "/api/messages",
+                params={"channel": "Public", "from": 0, "limit": 100},
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        finally:
+            _remove_token()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["channel"] == "Public"
+    assert body["count"] == 3
+    assert len(body["messages"]) == 3
+    assert body["messages"][0]["text"] == "msg 0"
+    assert body["messages"][0]["sender"] == "Alice"
+
+
+def test_get_messages_default_limit_is_100():
+    """Without explicit limit, the query is issued with limit=100."""
+    _install_token()
+    ch_result = _make_ch_result([])
+
+    with patch("app.api.routes.messages.get_client") as mock_get_client:
+        mock_get_client.return_value.query.return_value = ch_result
+        try:
+            response = client.get(
+                "/api/messages",
+                params={"channel": "Public"},
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        finally:
+            _remove_token()
+
+    assert response.status_code == 200
+    # Verify the query was called with limit=100 in the parameters.
+    call_kwargs = mock_get_client.return_value.query.call_args
+    params = call_kwargs.kwargs.get("parameters") or call_kwargs.args[1]
+    assert params["limit"] == 100
+
+
+def test_get_messages_offset_pagination_passes_offset_to_query():
+    """The 'from' value is forwarded to ClickHouse as the OFFSET."""
+    _install_token()
+    ch_result = _make_ch_result([])
+
+    with patch("app.api.routes.messages.get_client") as mock_get_client:
+        mock_get_client.return_value.query.return_value = ch_result
+        try:
+            response = client.get(
+                "/api/messages",
+                params={"channel": "Public", "from": 50, "limit": 25},
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        finally:
+            _remove_token()
+
+    assert response.status_code == 200
+    call_kwargs = mock_get_client.return_value.query.call_args
+    params = call_kwargs.kwargs.get("parameters") or call_kwargs.args[1]
+    assert params["offset"] == 50
+    assert params["limit"] == 25
+
+
+def test_get_messages_empty_result_returns_empty_list():
+    """A channel with no messages returns count=0 and an empty list."""
+    _install_token()
+
+    with patch("app.api.routes.messages.get_client") as mock_get_client:
+        mock_get_client.return_value.query.return_value = _make_ch_result([])
+        try:
+            response = client.get(
+                "/api/messages",
+                params={"channel": "Public"},
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        finally:
+            _remove_token()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 0
+    assert body["messages"] == []
+
+
+# ── Happy path — time-based (since) ──────────────────────────────────────────
+
+
+def test_get_messages_since_returns_messages():
+    """GET /api/messages?channel=Public&since=... returns rows from ClickHouse."""
+    _install_token()
+    rows = [_make_row("recent msg")]
+    ch_result = _make_ch_result(rows)
+
+    with patch("app.api.routes.messages.get_client") as mock_get_client:
+        mock_get_client.return_value.query.return_value = ch_result
+        try:
+            response = client.get(
+                "/api/messages",
+                params={
+                    "channel": "Public",
+                    "since": "2026-02-10 18:59:07.541",
+                },
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        finally:
+            _remove_token()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 1
+    assert body["messages"][0]["text"] == "recent msg"
+
+
+def test_get_messages_since_passes_datetime_to_query():
+    """The parsed 'since' datetime is forwarded to ClickHouse as since_dt."""
+    _install_token()
+    ch_result = _make_ch_result([])
+
+    with patch("app.api.routes.messages.get_client") as mock_get_client:
+        mock_get_client.return_value.query.return_value = ch_result
+        try:
+            response = client.get(
+                "/api/messages",
+                params={"channel": "Public", "since": "2026-02-10T18:59:07.541"},
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        finally:
+            _remove_token()
+
+    assert response.status_code == 200
+    call_kwargs = mock_get_client.return_value.query.call_args
+    params = call_kwargs.kwargs.get("parameters") or call_kwargs.args[1]
+    assert isinstance(params["since_dt"], datetime)
+    assert params["since_dt"] == datetime(2026, 2, 10, 18, 59, 7, 541000)
+
+
+def test_get_messages_since_uses_no_limit_or_offset():
+    """When 'since' is supplied the query must not contain offset/limit params."""
+    _install_token()
+    ch_result = _make_ch_result([])
+
+    with patch("app.api.routes.messages.get_client") as mock_get_client:
+        mock_get_client.return_value.query.return_value = ch_result
+        try:
+            client.get(
+                "/api/messages",
+                params={"channel": "Public", "since": "2026-02-10T18:59:07"},
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        finally:
+            _remove_token()
+
+    call_kwargs = mock_get_client.return_value.query.call_args
+    params = call_kwargs.kwargs.get("parameters") or call_kwargs.args[1]
+    assert "limit" not in params
+    assert "offset" not in params
+
+
+# ── Error paths ───────────────────────────────────────────────────────────────
+
+
+def test_get_messages_clickhouse_unavailable_returns_503():
+    """A ClickHouse failure returns 503."""
+    _install_token()
+
+    with patch("app.api.routes.messages.get_client") as mock_get_client:
+        mock_get_client.return_value.query.side_effect = Exception("connection refused")
+        try:
+            response = client.get(
+                "/api/messages",
+                params={"channel": "Public"},
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        finally:
+            _remove_token()
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["status"] == "error"
+
+
+# ── Order parameter ───────────────────────────────────────────────────────────
+
+
+def test_get_messages_order_asc_is_default():
+    """Without an explicit order param the SQL uses ASC."""
+    _install_token()
+    ch_result = _make_ch_result([])
+
+    with patch("app.api.routes.messages.get_client") as mock_get_client:
+        mock_get_client.return_value.query.return_value = ch_result
+        try:
+            client.get(
+                "/api/messages",
+                params={"channel": "Public"},
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        finally:
+            _remove_token()
+
+    sql = mock_get_client.return_value.query.call_args.args[0]
+    assert "ORDER BY received_at ASC" in sql
+
+
+def test_get_messages_order_desc():
+    """order=desc produces DESC in the SQL."""
+    _install_token()
+    ch_result = _make_ch_result([])
+
+    with patch("app.api.routes.messages.get_client") as mock_get_client:
+        mock_get_client.return_value.query.return_value = ch_result
+        try:
+            client.get(
+                "/api/messages",
+                params={"channel": "Public", "order": "desc"},
+                headers={"x-api-token": _VALID_TOKEN},
+            )
+        finally:
+            _remove_token()
+
+    sql = mock_get_client.return_value.query.call_args.args[0]
+    assert "ORDER BY received_at DESC" in sql
+
+
+def test_get_messages_invalid_order_returns_422():
+    """An order value other than 'asc' or 'desc' returns 422."""
+    _install_token()
+    try:
+        response = client.get(
+            "/api/messages",
+            params={"channel": "Public", "order": "random"},
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+        assert response.status_code == 422
+    finally:
+        _remove_token()

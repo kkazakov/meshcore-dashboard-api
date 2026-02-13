@@ -1,0 +1,54 @@
+meta {
+  name: Get Messages (Public, offset)
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{base_url}}/api/messages?channel=Public&from=0&limit=100&order=asc
+  body: none
+  auth: none
+}
+
+params:query {
+  channel: Public
+  from: 0
+  limit: 100
+  order: asc
+}
+
+headers {
+  x-api-token: {{auth_token}}
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+
+  test("channel field matches request", function() {
+    expect(res.body.channel).to.equal("Public");
+  });
+
+  test("count is a non-negative integer", function() {
+    expect(res.body.count).to.be.a("number");
+    expect(res.body.count).to.be.at.least(0);
+  });
+
+  test("messages is an array", function() {
+    expect(res.body.messages).to.be.an("array");
+  });
+
+  test("count matches messages array length", function() {
+    expect(res.body.count).to.equal(res.body.messages.length);
+  });
+
+  test("each message has required fields", function() {
+    res.body.messages.forEach(function(msg) {
+      expect(msg).to.have.property("ts");
+      expect(msg).to.have.property("sender");
+      expect(msg).to.have.property("hops");
+      expect(msg).to.have.property("text");
+    });
+  });
+}
