@@ -5,13 +5,12 @@ Usage
 -----
     from app.db.clickhouse import get_client, ping
 
-    client = get_client()       # returns a synchronous ClickHouseClient
-    ok, latency_ms = await ping()  # health-check used by GET /status
+    client = get_client()       # returns a new ClickHouseClient (thread-safe)
+    ok, latency_ms = ping()     # health-check used by GET /status
 """
 
 import time
 import logging
-from functools import lru_cache
 
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
@@ -21,20 +20,16 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=1)
 def get_client() -> Client:
     """
-    Return a cached ClickHouse client.
+    Return a new ClickHouse client for the current request/thread.
 
-    The client is created once and reused for the lifetime of the process.
-    Call `get_client.cache_clear()` in tests to force a new connection.
+    ``clickhouse-connect`` clients are not thread-safe — a single cached
+    instance shared across threads causes "concurrent queries within the same
+    session" errors under load.  Creating a client per call is cheap because
+    the underlying HTTP connection pool (urllib3) is managed globally by the
+    library and reused automatically.
     """
-    logger.info(
-        "Connecting to ClickHouse at %s:%s (db=%s)",
-        settings.clickhouse_host,
-        settings.clickhouse_port,
-        settings.clickhouse_database,
-    )
     return clickhouse_connect.get_client(
         host=settings.clickhouse_host,
         port=settings.clickhouse_port,
