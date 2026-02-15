@@ -12,6 +12,128 @@ Provide a comprehensive local interface for MeshCore mesh radio networks, includ
 
 All data is stored locally in ClickHouse and exposed through a FastAPI REST API, with the frontend to follow.
 
+---
+
+## WebSocket Real-Time Broadcasting
+
+New messages are broadcast in real-time to all connected authenticated WebSocket clients via `/ws` endpoint.
+
+### Connection
+
+```
+ws://localhost:8000/ws
+```
+
+### Authentication
+
+Send an authentication message immediately after connecting:
+
+```json
+{"type": "auth", "token": "<your-api-token>"}
+```
+
+On success, the server responds:
+
+```json
+{"type": "welcome", "email": "user@example.com"}
+```
+
+On failure, the server closes the connection with an error code.
+
+### Message Format
+
+New messages are broadcast as:
+
+```json
+{
+  "type": "new_message",
+  "data": {
+    "received_at": "2026-02-15T12:34:56.789Z",
+    "channel_name": "test",
+    "sender_name": "alice",
+    "text": "Hello world",
+    "msg_type": "CHAN",
+    "snr": 5.2,
+    "channel_idx": 0,
+    "sender_timestamp": 1740000000
+  }
+}
+```
+
+### Client Reconnection
+
+Clients should implement automatic reconnection on disconnect. A simple strategy:
+
+1. Wait 1-5 seconds after disconnect
+2. Reconnect and re-authenticate
+3. Resume listening for messages
+
+### Client Example (Python)
+
+```python
+import asyncio
+import websockets
+import json
+
+async def connect_to_websocket():
+    token = "your-api-token-here"
+    
+    async with websockets.connect("ws://localhost:8000/ws") as ws:
+        # Authenticate
+        await ws.send(json.dumps({"type": "auth", "token": token}))
+        response = await ws.recv()
+        message = json.loads(response)
+        
+        if message["type"] == "welcome":
+            print(f"Connected as {message['email']}")
+        
+        # Listen for messages
+        while True:
+            response = await ws.recv()
+            message = json.loads(response)
+            
+            if message["type"] == "new_message":
+                data = message["data"]
+                print(f"[{data['channel_name']}] {data['sender_name']}: {data['text']}")
+                print(f"  SNR: {data['snr']} dB")
+
+asyncio.run(connect_to_websocket())
+```
+
+### Client Example (JavaScript/TypeScript)
+
+```typescript
+const token = "your-api-token-here";
+const ws = new WebSocket("ws://localhost:8000/ws");
+
+ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "auth", token }));
+};
+
+ws.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    
+    if (message.type === "welcome") {
+        console.log(`Connected as ${message.email}`);
+    }
+    
+    if (message.type === "new_message") {
+        const data = message.data;
+        console.log(`[${data.channel_name}] ${data.sender_name}: ${data.text}`);
+        console.log(`  SNR: ${data.snr} dB`);
+    }
+};
+
+ws.onclose = () => {
+    console.log("Disconnected. Reconnecting in 3 seconds...");
+    setTimeout(() => {
+        new WebSocket("ws://localhost:8000/ws");
+    }, 3000);
+};
+```
+
+---
+
 ## Stack
 
 - **API** — Python / FastAPI
@@ -298,9 +420,21 @@ Returns `404` if the channel name is not found.
 ### Messaging — Messages
 
 | Method | Path | Auth | Description |
-|---|---|---|---|
+|---|---|---|
 | `POST` | `/api/messages` | x-api-token | Send a message to a channel on the device |
 | `GET` | `/api/messages` | x-api-token | Fetch stored messages from ClickHouse |
+
+---
+
+### WebSocket
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `WS` | `/ws` | Token in message body | Real-time message broadcasting via WebSocket |
+
+**WebSocket Connection**: `ws://localhost:8000/ws`
+
+**Authentication**: Send `{"type": "auth", "token": "<your-api-token>"}` immediately after connecting.
 
 #### POST /api/messages — send a message
 
@@ -451,6 +585,177 @@ Runs automatically on server startup as an `asyncio` background task.
 | `repeater_name` | `String` | Repeater name (denormalized) |
 | `metric_key` | `LowCardinality(String)` | Metric name (`battery_voltage`, `battery_percentage`) |
 | `metric_value` | `Float64` | Metric value |
+
+---
+
+---
+
+## WebSocket Real-Time Broadcasting
+
+New messages are broadcast in real-time to all connected authenticated WebSocket clients via `/ws` endpoint.
+
+### Connection
+
+```
+ws://localhost:8000/ws
+```
+
+### Authentication
+
+Send an authentication message immediately after connecting:
+
+```json
+{"type": "auth", "token": "<your-api-token>"}
+```
+
+On success, the server responds:
+
+```json
+{"type": "welcome", "email": "user@example.com"}
+```
+
+On failure, the server closes the connection.
+
+### Message Format
+
+New messages are broadcast as:
+
+```json
+{
+  "type": "new_message",
+  "data": {
+    "received_at": "2026-02-15T12:34:56.789Z",
+    "channel_name": "test",
+    "sender_name": "alice",
+    "text": "Hello world",
+    "msg_type": "CHAN",
+    "snr": 5.2,
+    "channel_idx": 0,
+    "sender_timestamp": 1740000000
+  }
+}
+```
+
+### Client Reconnection
+
+Clients should implement automatic reconnection on disconnect. A simple strategy:
+
+1. Wait 1-5 seconds after disconnect
+2. Reconnect and re-authenticate
+3. Resume listening for messages
+
+### Error Codes and Edge Cases
+
+**Authentication failures:**
+- `4003` — First message must be authentication type
+- `4003` — Missing token
+- `4003` — Invalid or expired token
+
+**Server behavior:**
+- Messages are debounced for 1 second to batch multiple messages
+- Queue capacity is 1000 messages; oldest messages are dropped if full
+- Server sends heartbeats every 30 seconds to detect stale connections
+- Clients are automatically removed from the broadcast list on disconnect
+
+### Client Examples
+
+#### Python (using `websockets` library)
+
+```python
+import asyncio
+import websockets
+import json
+
+async def connect_to_websocket():
+    token = "your-api-token-here"
+    
+    async with websockets.connect("ws://localhost:8000/ws") as ws:
+        # Authenticate
+        await ws.send(json.dumps({"type": "auth", "token": token}))
+        response = await ws.recv()
+        message = json.loads(response)
+        
+        if message["type"] == "welcome":
+            print(f"Connected as {message['email']}")
+        
+        # Listen for messages
+        while True:
+            response = await ws.recv()
+            message = json.loads(response)
+            
+            if message["type"] == "new_message":
+                data = message["data"]
+                print(f"[{data['channel_name']}] {data['sender_name']}: {data['text']}")
+                print(f"  SNR: {data['snr']} dB")
+
+asyncio.run(connect_to_websocket())
+```
+
+#### JavaScript (browser or Node.js)
+
+```javascript
+const token = "your-api-token-here";
+const ws = new WebSocket("ws://localhost:8000/ws");
+
+ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "auth", token }));
+};
+
+ws.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    
+    if (message.type === "welcome") {
+        console.log(`Connected as ${message.email}`);
+    }
+    
+    if (message.type === "new_message") {
+        const data = message.data;
+        console.log(`[${data.channel_name}] ${data.sender_name}: ${data.text}`);
+        console.log(`  SNR: ${data.snr} dB`);
+    }
+};
+
+ws.onclose = () => {
+    console.log("Disconnected. Reconnecting in 3 seconds...");
+    setTimeout(() => {
+        new WebSocket("ws://localhost:8000/ws");
+    }, 3000);
+};
+```
+
+#### JavaScript (using `ws` library in Node.js)
+
+```javascript
+const WebSocket = require('ws');
+
+const token = 'your-api-token-here';
+const ws = new WebSocket('ws://localhost:8000/ws');
+
+ws.on('open', () => {
+    ws.send(JSON.stringify({ type: 'auth', token }));
+});
+
+ws.on('message', (data) => {
+    const message = JSON.parse(data.toString());
+    
+    if (message.type === 'welcome') {
+        console.log(`Connected as ${message.email}`);
+    }
+    
+    if (message.type === 'new_message') {
+        const data = message.data;
+        console.log(`[${data.channel_name}] ${data.sender_name}: ${data.text}`);
+        console.log(`  SNR: ${data.snr} dB`);
+    }
+});
+
+ws.on('close', () => {
+    console.log('Disconnected. Reconnecting in 3 seconds...');
+    setTimeout(() => {
+        new WebSocket('ws://localhost:8000/ws');
+    }, 3000);
+});
+```
 
 ---
 
