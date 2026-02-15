@@ -52,10 +52,14 @@ USER appuser
 
 EXPOSE 8080
 
-# Production: multiple workers, no reload, no access log noise
+# Single worker: the MeshCore device accepts only one connection at a time.
+# Multiple workers would race on the same TCP/BLE/Serial endpoint with no
+# cross-process coordination, causing "TCPTransport closed" errors.
+# FastAPI/asyncio handles concurrent HTTP and WebSocket clients within one
+# worker without any throughput loss for this workload.
 CMD ["uvicorn", "app.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8080", \
-     "--workers", "2", \
+     "--workers", "1", \
      "--no-access-log", \
      "--no-use-colors"]
