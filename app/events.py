@@ -21,9 +21,10 @@ _connected_clients: set["WebSocketConnection"] = set()
 _clients_lock: asyncio.Lock | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class WebSocketConnection:
     """Represents an authenticated WebSocket connection."""
+
     websocket: Any
     email: str
     authenticated_at: datetime
@@ -122,7 +123,9 @@ async def broadcast_message(message: dict[str, Any]) -> None:
         try:
             await conn.websocket.send_json(payload)
         except Exception as exc:
-            logger.warning("Failed to send to %s: %s - removing client", conn.email, exc)
+            logger.warning(
+                "Failed to send to %s: %s - removing client", conn.email, exc
+            )
             disconnected.append(conn)
 
     if disconnected:
@@ -149,7 +152,9 @@ async def broadcast_task() -> None:
 
             while len(batch) < 100:
                 try:
-                    msg = await asyncio.wait_for(queue.get(), timeout=_BROADCAST_DEBOUNCE)
+                    msg = await asyncio.wait_for(
+                        queue.get(), timeout=_BROADCAST_DEBOUNCE
+                    )
                     batch.append(msg)
                 except asyncio.TimeoutError:
                     break
