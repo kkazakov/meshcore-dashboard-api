@@ -83,9 +83,9 @@ async def _fetch_repeater_telemetry(
     Fetch telemetry from a single repeater and return rows for insertion.
     Returns empty list if fetch fails.
     """
-    meshcore = None
-    try:
-        async with device_lock:
+    async with device_lock:
+        meshcore = None
+        try:
             try:
                 meshcore = await telemetry_common.connect_to_device(
                     config, verbose=False
@@ -154,12 +154,12 @@ async def _fetch_repeater_telemetry(
 
             return rows
 
-    finally:
-        if meshcore:
-            try:
-                await asyncio.wait_for(meshcore.disconnect(), timeout=5)
-            except Exception:
-                pass
+        finally:
+            if meshcore is not None:
+                try:
+                    await asyncio.wait_for(meshcore.disconnect(), timeout=5)
+                except Exception:
+                    pass
 
 
 async def _poll_all_repeaters(config: dict[str, Any]) -> int:

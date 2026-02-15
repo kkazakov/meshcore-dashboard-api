@@ -167,19 +167,12 @@ def _split_sender_and_text(raw: str) -> tuple[str, str]:
 
 async def _poll_once(config: dict[str, Any]) -> int:
     """
-    Try to acquire the device lock, connect, drain the message queue, disconnect.
-    Returns the number of messages stored, or -1 if the lock was busy (skipped).
+    Acquire the device lock, connect, drain the message queue, disconnect.
+    Returns the number of messages stored.
 
-    The lock is acquired with ``acquire()`` but only if it is not already held
-    by an API route.  If it is held, this cycle is skipped so the API request
-    is never delayed by a poll.
+    Waits for the lock if it is held by an API route or the repeater poller,
+    ensuring only one caller accesses the device at a time.
     """
-    if not device_lock.locked():
-        pass  # fall through to acquire below
-    else:
-        logger.debug("Device lock held by API route — skipping poll cycle")
-        return -1
-
     meshcore = None
     async with device_lock:
         try:
@@ -287,8 +280,7 @@ async def run_message_poller() -> None:
             count = await _poll_once(config)
             if count > 0:
                 logger.debug("Poll cycle: %d new message(s) stored", count)
-            if count >= 0:
-                backoff = _BACKOFF_BASE  # reset on successful (or skipped) cycle
+            backoff = _BACKOFF_BASE  # reset on successful cycle
             await asyncio.sleep(POLL_INTERVAL)
 
         except asyncio.CancelledError:
