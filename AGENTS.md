@@ -27,6 +27,9 @@ app/
     telemetry_common.py
     telemetry.py
     telemetry_json.py
+  events.py            # WebSocket event bus for real-time message broadcasting
+  api/
+    routes/            # One file per resource (status.py, contacts.py, …)
 tests/                 # pytest test files mirroring app/ structure
 requirements.txt
 .env / .env.example
@@ -182,9 +185,66 @@ mypy app/
 
 ---
 
+## WebSocket Real-Time Broadcasting
+
+### Overview
+The server broadcasts new messages to all connected authenticated WebSocket clients via `/ws` endpoint.
+
+### Connection
+```
+ws://localhost:8000/ws
+```
+
+### Authentication
+Send an authentication message immediately after connecting:
+```json
+{"type": "auth", "token": "<your-api-token>"}
+```
+
+On success, the server responds:
+```json
+{"type": "welcome", "email": "user@example.com"}
+```
+
+### Message Format
+New messages are broadcast as:
+```json
+{
+  "type": "new_message",
+  "data": {
+    "received_at": "2026-02-15T12:34:56.789Z",
+    "channel_name": "test",
+    "sender_name": "alice",
+    "text": "Hello world",
+    "msg_type": "CHAN",
+    "snr": 5.2,
+    "channel_idx": 0,
+    "sender_timestamp": 1740000000
+  }
+}
+```
+
+### Client Reconnection
+Clients should implement automatic reconnection on disconnect. A simple strategy:
+1. Wait 1-5 seconds after disconnect
+2. Reconnect and re-authenticate
+3. Resume listening for messages
+
+### Server-Side Behavior
+- Messages from the poller are queued with a 1-second debounce
+- Batches of up to 100 messages are broadcast together
+- Queue size is capped at 1000 messages (oldest dropped if full)
+- Heartbeats every 30 seconds to detect stale connections
+
+---
+
+## Adding a New Endpoint
+
 ## Adding a New Endpoint
 
 1. Create `app/api/routes/<resource>.py` with an `APIRouter`.
 2. Define Pydantic response/request models in the same file (or a `app/models/` file if shared).
 3. Register the router in `app/main.py` with `app.include_router(...)`.
 4. Add tests in `tests/test_<resource>.py`.
+
+---

@@ -19,6 +19,8 @@ from app.api.routes import messages as messages_router
 from app.api.routes import repeaters as repeaters_router
 from app.api.routes import status as status_router
 from app.api.routes import telemetry as telemetry_router
+from app.api.routes import websocket as websocket_router
+from app.events import broadcast_task, stop_broadcast_task
 from app.workers.message_poller import run_message_poller
 from app.workers.repeater_telemetry_poller import run_repeater_telemetry_poller
 
@@ -68,12 +70,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     repeater_poller_task = asyncio.create_task(
         run_repeater_telemetry_poller(), name="repeater_telemetry_poller"
     )
+    broadcast_task_handle = asyncio.create_task(broadcast_task(), name="broadcast_task")
     logger.info("Background workers started")
     try:
         yield
     finally:
         poller_task.cancel()
         repeater_poller_task.cancel()
+        broadcast_task_handle.cancel()
         try:
             await poller_task
         except asyncio.CancelledError:
@@ -82,6 +86,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await repeater_poller_task
         except asyncio.CancelledError:
             pass
+        try:
+            await broadcast_task_handle
+        except asyncio.CancelledError:
+            pass
+        await stop_broadcast_task()
         logger.info("Background workers stopped")
 
 
@@ -107,3 +116,4 @@ app.include_router(telemetry_router.router, tags=["telemetry"])
 app.include_router(channels_router.router, tags=["messaging"])
 app.include_router(messages_router.router, tags=["messaging"])
 app.include_router(repeaters_router.router, tags=["repeaters"])
+app.include_router(websocket_router.router, tags=["websocket"])

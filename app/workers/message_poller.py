@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.db.clickhouse import get_client
+from app.events import queue_message
 from app.meshcore import telemetry_common
 from app.meshcore.connection import device_lock
 from meshcore import EventType
@@ -87,6 +88,17 @@ def _insert_messages(rows: list[dict[str, Any]]) -> None:
     ]
     client.insert("messages", data, column_names=column_names)
     logger.info("Inserted %d message(s) into ClickHouse", len(rows))
+
+
+async def _queue_messages_for_broadcast(rows: list[dict[str, Any]]) -> None:
+    """Queue messages for WebSocket broadcast."""
+    if not rows:
+        return
+
+    for row in rows:
+        success = await queue_message(row)
+        if not success:
+            logger.warning("Failed to queue message for broadcast (queue full)")
 
 
 # ── Name resolution helpers ───────────────────────────────────────────────────
@@ -244,6 +256,7 @@ async def _poll_once(config: dict[str, Any]) -> int:
 
             if rows:
                 await asyncio.to_thread(_insert_messages, rows)
+                await _queue_messages_for_broadcast(rows)
 
             return len(rows)
 
