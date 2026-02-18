@@ -44,7 +44,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from app.api.deps import require_token
-from app.events import add_client, get_message_queue, remove_client
+from app.events import add_client, remove_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -92,14 +92,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
         await websocket.send_json({"type": "welcome", "email": email})
 
-        queue = get_message_queue()
-
+        # broadcast_task() handles pushing new_message events to all connected
+        # clients via broadcast_message(). This loop just keeps the connection
+        # alive and detects client disconnects via receive (ping/pong or close).
         while True:
             try:
-                msg = await asyncio.wait_for(queue.get(), timeout=30.0)
-                await websocket.send_json({"type": "new_message", "data": msg})
+                await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
             except asyncio.TimeoutError:
-                continue
+                # No message from client — send a ping to keep the connection alive
+                await websocket.send_json({"type": "ping"})
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
