@@ -105,7 +105,9 @@ def test_update_repeater_no_fields_returns_400():
             headers={"x-api-token": _VALID_TOKEN},
         )
     assert response.status_code == 400
-    assert "name or public_key" in response.json()["detail"]
+    assert "name" in response.json()["detail"]
+    assert "public_key" in response.json()["detail"]
+    assert "password" in response.json()["detail"]
 
 
 def test_update_repeater_blank_name_returns_400():

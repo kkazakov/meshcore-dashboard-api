@@ -31,12 +31,14 @@ class RepeaterCreate(BaseModel):
 class RepeaterUpdate(BaseModel):
     name: str | None = None
     public_key: str | None = None
+    password: str | None = None
 
 
 class RepeaterListItem(BaseModel):
     id: str
     name: str
     public_key: str
+    password: str
     enabled: bool
     created_at: str
 
@@ -58,7 +60,7 @@ def list_repeaters(_email: str = Depends(require_token)) -> RepeaterListResponse
     """
     client = get_client()
     result = client.query(
-        "SELECT id, name, public_key, enabled, created_at "
+        "SELECT id, name, public_key, password, enabled, created_at "
         "FROM repeaters FINAL "
         "ORDER BY created_at DESC"
     )
@@ -70,8 +72,9 @@ def list_repeaters(_email: str = Depends(require_token)) -> RepeaterListResponse
                 id=str(row[0]),
                 name=row[1],
                 public_key=row[2],
-                enabled=row[3],
-                created_at=row[4].isoformat() if row[4] else "",
+                password=row[3],
+                enabled=row[4],
+                created_at=row[5].isoformat() if row[5] else "",
             )
         )
 
@@ -130,6 +133,7 @@ def add_repeater(
             id=str(repeater_id),
             name=data.name.strip(),
             public_key=data.public_key.strip(),
+            password=data.password or "",
             enabled=True,
             created_at=now.isoformat(),
         ),
@@ -157,10 +161,10 @@ def update_repeater(
         raise HTTPException(status_code=400, detail="name must not be blank")
     if data.public_key is not None and not data.public_key.strip():
         raise HTTPException(status_code=400, detail="public_key must not be blank")
-    if data.name is None and data.public_key is None:
+    if data.name is None and data.public_key is None and data.password is None:
         raise HTTPException(
             status_code=400,
-            detail="At least one of name or public_key must be provided",
+            detail="At least one of name, public_key, or password must be provided",
         )
 
     client = get_client()
@@ -183,6 +187,7 @@ def update_repeater(
     new_public_key = (
         data.public_key.strip() if data.public_key is not None else current_public_key
     )
+    new_password = data.password if data.password is not None else password
 
     if new_public_key != current_public_key:
         conflict = client.query(
@@ -199,7 +204,7 @@ def update_repeater(
 
     client.insert(
         "repeaters",
-        [[repeater_id, new_name, new_public_key, password, enabled, now]],
+        [[repeater_id, new_name, new_public_key, new_password, enabled, now]],
         column_names=["id", "name", "public_key", "password", "enabled", "created_at"],
     )
 
@@ -211,6 +216,7 @@ def update_repeater(
             id=repeater_id,
             name=new_name,
             public_key=new_public_key,
+            password=new_password,
             enabled=enabled,
             created_at=now.isoformat(),
         ),

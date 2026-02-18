@@ -26,4 +26,10 @@ tests {
   test("repeaters array present", function() {
     expect(res.body.repeaters).to.be.an("array");
   });
+
+  test("each repeater has a password field", function() {
+    res.body.repeaters.forEach(function(r) {
+      expect(r).to.have.property("password");
+    });
+  });
 }
