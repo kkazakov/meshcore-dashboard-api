@@ -1,5 +1,5 @@
 """
-Tests for POST /api/login endpoint.
+Tests for POST /api/login and token validation.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,6 +15,8 @@ _HASH = bcrypt.hashpw(b"secret", bcrypt.gensalt()).decode()
 
 _ACTIVE_ROW = [(_HASH, "alice", True, "")]
 _INACTIVE_ROW = [(_HASH, "alice", False, "")]
+
+_VALID_TOKEN = "test-token-auth-abc123"
 
 
 def _mock_client(rows: list) -> MagicMock:
@@ -146,3 +148,86 @@ def test_login_database_unavailable():
         )
 
     assert response.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Token validation respects active flag
+# ---------------------------------------------------------------------------
+
+
+def _mock_deps_client(active: bool) -> MagicMock:
+    """
+    Return a mock ClickHouse client for ``app.api.deps``.
+
+    When *active* is True the JOIN query returns a row (user is active and
+    the token is valid).  When False it returns no rows, simulating a
+    deactivated or deleted user.
+    """
+    mock_result = MagicMock()
+    mock_result.result_rows = [["alice@example.com"]] if active else []
+    mock_ch = MagicMock()
+    mock_ch.query.return_value = mock_result
+    return mock_ch
+
+
+def test_require_token_rejects_inactive_user():
+    """
+    A token whose user has active=false must be rejected with 401.
+
+    The token JOIN query returns no rows when the user is inactive, so
+    ``require_token`` must raise HTTP 401 rather than returning the email.
+    """
+    mock_ch = _mock_deps_client(active=False)
+    # Use any protected endpoint — repeaters list is simple and dependency-free.
+    with patch("app.api.deps.get_client", return_value=mock_ch):
+        response = client.get("/api/repeaters", headers={"x-api-token": _VALID_TOKEN})
+
+    assert response.status_code == 401
+
+
+def test_require_token_accepts_active_user():
+    """
+    A token belonging to an active user must be accepted (returns the email).
+
+    We verify this by checking that the protected endpoint does NOT return 401.
+    The repeaters query itself is mocked to return an empty list so we only
+    need to stub ``deps.get_client`` for the token check and
+    ``repeaters.get_client`` for the list query.
+    """
+    token_ch = _mock_deps_client(active=True)
+
+    # Stub the repeaters list query
+    repeater_result = MagicMock()
+    repeater_result.result_rows = []
+    repeater_ch = MagicMock()
+    repeater_ch.query.return_value = repeater_result
+
+    with (
+        patch("app.api.deps.get_client", return_value=token_ch),
+        patch("app.api.routes.repeaters.get_client", return_value=repeater_ch),
+    ):
+        response = client.get("/api/repeaters", headers={"x-api-token": _VALID_TOKEN})
+
+    assert response.status_code == 200
+
+
+def test_status_not_authenticated_for_inactive_user_token():
+    """
+    GET /status must return authenticated=false when the token owner is inactive.
+
+    ``_check_token_valid`` now JOINs users and filters active=true, so a token
+    for a deactivated user returns no rows and therefore authenticated=false.
+    """
+    mock_result = MagicMock()
+    mock_result.result_rows = []  # no rows → inactive / deleted user
+    mock_ch = MagicMock()
+    mock_ch.query.return_value = mock_result
+
+    with (
+        patch("app.api.routes.status.ping", return_value=(True, 1.0)),
+        patch("app.api.routes.status.get_client", return_value=mock_ch),
+    ):
+        response = client.get("/status", headers={"x-api-token": _VALID_TOKEN})
+
+    assert response.status_code == 200
+    assert response.json()["authenticated"] is False

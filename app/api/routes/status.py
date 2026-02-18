@@ -20,12 +20,14 @@ class StatusResponse(BaseModel):
 
 
 def _check_token_valid(token: str) -> bool:
-    """Check if token exists and is not expired in ClickHouse."""
+    """Check if token exists, is not expired, and belongs to an active user."""
     try:
         client = get_client()
         result = client.query(
-            "SELECT 1 FROM tokens FINAL "
-            "WHERE token = {token:String} AND expires_at > now64() "
+            "SELECT 1 FROM tokens t FINAL "
+            "INNER JOIN (SELECT email FROM users FINAL WHERE active = true) u "
+            "ON t.email = u.email "
+            "WHERE t.token = {token:String} AND t.expires_at > now64() "
             "LIMIT 1",
             parameters={"token": token},
         )

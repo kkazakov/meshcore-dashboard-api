@@ -53,8 +53,10 @@ def require_token(
     try:
         client = get_client()
         result = client.query(
-            "SELECT email FROM tokens FINAL "
-            "WHERE token = {token:String} AND expires_at > now64() "
+            "SELECT t.email FROM tokens t FINAL "
+            "INNER JOIN (SELECT email FROM users FINAL WHERE active = true) u "
+            "ON t.email = u.email "
+            "WHERE t.token = {token:String} AND t.expires_at > now64() "
             "LIMIT 1",
             parameters={"token": x_api_token},
         )
