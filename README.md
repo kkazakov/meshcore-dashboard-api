@@ -1,6 +1,6 @@
 # Meshcore Dashboard API
 
-A self-hosted dashboard API for managing and monitoring local [MeshCore](https://github.com/ripplebiz/MeshCore) devices.
+A self-hosted dashboard API for managing and monitoring local [MeshCore](https://github.com/meshcore-dev/MeshCore) devices.
 
 ## Goal
 
@@ -142,43 +142,178 @@ ws.onclose = () => {
 
 ---
 
-## Setup
+## Installation
+
+### 1. Python environment
 
 ```bash
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # edit with your values
+cp .env.example .env   # edit with your values (see Configuration below)
 ```
 
-### Database
+---
 
-Apply the schema migrations in order against your ClickHouse instance:
+### 2. Device setup
+
+The dashboard connects to a MeshCore node acting as a **companion device**. Three transports are supported: **BLE**, **Serial**, and **Wi-Fi/TCP**.
+
+#### BLE
+
+Connect a MeshCore device to the host machine via Bluetooth. No physical cable is needed — the dashboard will scan for and connect to the nearest advertising device automatically if no address is specified.
+
+```ini
+CONNECTION_TYPE=ble
+
+# Leave blank to auto-scan, or set a specific MAC address to target one device
+BLE_ADDRESS=AA:BB:CC:DD:EE:FF
+
+# Optional: 6-digit PIN required by some firmware builds
+BLE_PIN=123456
+```
+
+#### Serial (USB)
+
+Plug the device into a USB port. The OS will expose it as a serial port (e.g. `/dev/ttyUSB0` on Linux, `COM3` on Windows).
+
+```ini
+CONNECTION_TYPE=serial
+
+SERIAL_PORT=/dev/ttyUSB0
+SERIAL_BAUDRATE=115200
+```
+
+On Linux you may need to add your user to the `dialout` group to access the port without `sudo`:
+
+```bash
+sudo usermod -aG dialout $USER
+# Log out and back in for the change to take effect
+```
+
+#### Wi-Fi / TCP
+
+The device must be running the **Wi-Fi Companion firmware** that opens a TCP socket. Flash the firmware from:
+
+> [MeshCore Wi-Fi Companion Patcher](https://cloud.weyhmueller.org/s/meshcore-stuff?dir=/WiFi%20Companion%20Patcher)
+
+Once the device is on your network, set its IP and port:
+
+```ini
+CONNECTION_TYPE=tcp
+
+TCP_HOST=192.168.1.100   # IP address of the MeshCore Wi-Fi companion
+TCP_PORT=4000
+```
+
+---
+
+### 3. ClickHouse setup
+
+#### Install ClickHouse
+
+Follow the [official ClickHouse installation guide](https://clickhouse.com/docs/en/install) for your platform, or run it via Docker:
+
+```bash
+docker run -d \
+  --name clickhouse \
+  -p 8123:8123 \
+  -p 9000:9000 \
+  clickhouse/clickhouse-server
+```
+
+#### Create a dedicated user and database
+
+It is recommended to create a dedicated ClickHouse user instead of using the default `default` account. Connect to ClickHouse as an admin:
+
+```bash
+clickhouse-client --user default
+```
+
+Then run the following SQL to create the database and a dedicated user:
+
+```sql
+-- Create the database
+CREATE DATABASE IF NOT EXISTS meshcore_dashboard;
+
+-- Create a dedicated user with a strong password
+CREATE USER meshcore_user IDENTIFIED WITH sha256_password BY 'your_strong_password';
+
+-- Grant full access to the meshcore_dashboard database
+GRANT ALL ON meshcore_dashboard.* TO meshcore_user;
+```
+
+Update your `.env` to reflect the new credentials:
+
+```ini
+CLICKHOUSE_HOST=localhost
+CLICKHOUSE_PORT=8123
+CLICKHOUSE_DATABASE=meshcore_dashboard
+CLICKHOUSE_USER=meshcore_user
+CLICKHOUSE_PASSWORD=your_strong_password
+```
+
+#### Apply schema migrations
+
+Run the SQL scripts in order against your ClickHouse instance. Each script is idempotent (`CREATE TABLE IF NOT EXISTS`) and safe to re-run.
+
+**Option A — `clickhouse-client` (CLI)**
 
 ```bash
 # 001 — users / authentication
-clickhouse-client --multiquery < sql/001_authentication.sql
+clickhouse-client --user meshcore_user --password your_strong_password \
+  --database meshcore_dashboard --multiquery < sql/001_authentication.sql
 
 # 002 — messages store
-clickhouse-client --multiquery < sql/002_messages.sql
+clickhouse-client --user meshcore_user --password your_strong_password \
+  --database meshcore_dashboard --multiquery < sql/002_messages.sql
 
 # 003 — repeaters to monitor
-clickhouse-client --multiquery < sql/003_repeaters.sql
+clickhouse-client --user meshcore_user --password your_strong_password \
+  --database meshcore_dashboard --multiquery < sql/003_repeaters.sql
 
 # 004 — repeater telemetry store
-clickhouse-client --multiquery < sql/004_repeater_telemetry.sql
+clickhouse-client --user meshcore_user --password your_strong_password \
+  --database meshcore_dashboard --multiquery < sql/004_repeater_telemetry.sql
+
+# 005 — session tokens
+clickhouse-client --user meshcore_user --password your_strong_password \
+  --database meshcore_dashboard --multiquery < sql/005_tokens.sql
 ```
 
-Or via the Python client (adjust credentials as needed):
+**Option B — Python `clickhouse-connect`**
 
 ```python
 import clickhouse_connect
-client = clickhouse_connect.get_client(host="localhost", username="admin", password="...")
-client.command(open("sql/001_authentication.sql").read())
-client.command(open("sql/002_messages.sql").read())
-client.command(open("sql/003_repeaters.sql").read())
-client.command(open("sql/004_repeater_telemetry.sql").read())
+
+client = clickhouse_connect.get_client(
+    host="localhost",
+    username="meshcore_user",
+    password="your_strong_password",
+    database="meshcore_dashboard",
+)
+
+for script in [
+    "sql/001_authentication.sql",
+    "sql/002_messages.sql",
+    "sql/003_repeaters.sql",
+    "sql/004_repeater_telemetry.sql",
+    "sql/005_tokens.sql",
+]:
+    client.command(open(script).read())
+    print(f"Applied {script}")
 ```
+
+#### Default admin account
+
+`sql/001_authentication.sql` seeds an initial user:
+
+| Field | Value |
+|---|---|
+| Email | `admin@example.com` |
+| Password | `admin` |
+
+Change this password immediately after first login via the API or by updating the `password_hash` column directly in ClickHouse (bcrypt).
 
 ---
 
@@ -216,7 +351,7 @@ All settings are read from `.env` (see `.env.example` for the full template).
 | `CLICKHOUSE_HOST` | `localhost` | ClickHouse host |
 | `CLICKHOUSE_PORT` | `8123` | ClickHouse HTTP port |
 | `CLICKHOUSE_DATABASE` | `meshcore_dashboard` | Database name |
-| `CLICKHOUSE_USER` | `admin` | ClickHouse username |
+| `CLICKHOUSE_USER` | `meshcore_user` | ClickHouse username |
 | `CLICKHOUSE_PASSWORD` | *(empty)* | ClickHouse password |
 
 ### API server
@@ -585,177 +720,6 @@ Runs automatically on server startup as an `asyncio` background task.
 | `repeater_name` | `String` | Repeater name (denormalized) |
 | `metric_key` | `LowCardinality(String)` | Metric name (`battery_voltage`, `battery_percentage`) |
 | `metric_value` | `Float64` | Metric value |
-
----
-
----
-
-## WebSocket Real-Time Broadcasting
-
-New messages are broadcast in real-time to all connected authenticated WebSocket clients via `/ws` endpoint.
-
-### Connection
-
-```
-ws://localhost:8000/ws
-```
-
-### Authentication
-
-Send an authentication message immediately after connecting:
-
-```json
-{"type": "auth", "token": "<your-api-token>"}
-```
-
-On success, the server responds:
-
-```json
-{"type": "welcome", "email": "user@example.com"}
-```
-
-On failure, the server closes the connection.
-
-### Message Format
-
-New messages are broadcast as:
-
-```json
-{
-  "type": "new_message",
-  "data": {
-    "received_at": "2026-02-15T12:34:56.789Z",
-    "channel_name": "test",
-    "sender_name": "alice",
-    "text": "Hello world",
-    "msg_type": "CHAN",
-    "snr": 5.2,
-    "channel_idx": 0,
-    "sender_timestamp": 1740000000
-  }
-}
-```
-
-### Client Reconnection
-
-Clients should implement automatic reconnection on disconnect. A simple strategy:
-
-1. Wait 1-5 seconds after disconnect
-2. Reconnect and re-authenticate
-3. Resume listening for messages
-
-### Error Codes and Edge Cases
-
-**Authentication failures:**
-- `4003` — First message must be authentication type
-- `4003` — Missing token
-- `4003` — Invalid or expired token
-
-**Server behavior:**
-- Messages are debounced for 1 second to batch multiple messages
-- Queue capacity is 1000 messages; oldest messages are dropped if full
-- Server sends heartbeats every 30 seconds to detect stale connections
-- Clients are automatically removed from the broadcast list on disconnect
-
-### Client Examples
-
-#### Python (using `websockets` library)
-
-```python
-import asyncio
-import websockets
-import json
-
-async def connect_to_websocket():
-    token = "your-api-token-here"
-    
-    async with websockets.connect("ws://localhost:8000/ws") as ws:
-        # Authenticate
-        await ws.send(json.dumps({"type": "auth", "token": token}))
-        response = await ws.recv()
-        message = json.loads(response)
-        
-        if message["type"] == "welcome":
-            print(f"Connected as {message['email']}")
-        
-        # Listen for messages
-        while True:
-            response = await ws.recv()
-            message = json.loads(response)
-            
-            if message["type"] == "new_message":
-                data = message["data"]
-                print(f"[{data['channel_name']}] {data['sender_name']}: {data['text']}")
-                print(f"  SNR: {data['snr']} dB")
-
-asyncio.run(connect_to_websocket())
-```
-
-#### JavaScript (browser or Node.js)
-
-```javascript
-const token = "your-api-token-here";
-const ws = new WebSocket("ws://localhost:8000/ws");
-
-ws.onopen = () => {
-    ws.send(JSON.stringify({ type: "auth", token }));
-};
-
-ws.onmessage = (event) => {
-    const message = JSON.parse(event.data);
-    
-    if (message.type === "welcome") {
-        console.log(`Connected as ${message.email}`);
-    }
-    
-    if (message.type === "new_message") {
-        const data = message.data;
-        console.log(`[${data.channel_name}] ${data.sender_name}: ${data.text}`);
-        console.log(`  SNR: ${data.snr} dB`);
-    }
-};
-
-ws.onclose = () => {
-    console.log("Disconnected. Reconnecting in 3 seconds...");
-    setTimeout(() => {
-        new WebSocket("ws://localhost:8000/ws");
-    }, 3000);
-};
-```
-
-#### JavaScript (using `ws` library in Node.js)
-
-```javascript
-const WebSocket = require('ws');
-
-const token = 'your-api-token-here';
-const ws = new WebSocket('ws://localhost:8000/ws');
-
-ws.on('open', () => {
-    ws.send(JSON.stringify({ type: 'auth', token }));
-});
-
-ws.on('message', (data) => {
-    const message = JSON.parse(data.toString());
-    
-    if (message.type === 'welcome') {
-        console.log(`Connected as ${message.email}`);
-    }
-    
-    if (message.type === 'new_message') {
-        const data = message.data;
-        console.log(`[${data.channel_name}] ${data.sender_name}: ${data.text}`);
-        console.log(`  SNR: ${data.snr} dB`);
-    }
-});
-
-ws.on('close', () => {
-    console.log('Disconnected. Reconnecting in 3 seconds...');
-    setTimeout(() => {
-        new WebSocket('ws://localhost:8000/ws');
-    }, 3000);
-});
-```
 
 ---
 
