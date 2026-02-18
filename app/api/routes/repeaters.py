@@ -28,6 +28,11 @@ class RepeaterCreate(BaseModel):
     password: str | None = None
 
 
+class RepeaterUpdate(BaseModel):
+    name: str | None = None
+    public_key: str | None = None
+
+
 class RepeaterListItem(BaseModel):
     id: str
     name: str
@@ -126,6 +131,87 @@ def add_repeater(
             name=data.name.strip(),
             public_key=data.public_key.strip(),
             enabled=True,
+            created_at=now.isoformat(),
+        ),
+    )
+
+
+@router.patch("/api/repeaters/{repeater_id}", response_model=RepeaterSingleResponse)
+def update_repeater(
+    repeater_id: str,
+    data: RepeaterUpdate,
+    _email: str = Depends(require_token),
+) -> RepeaterSingleResponse:
+    """
+    Update a repeater's name and/or public_key.
+
+    At least one of ``name`` or ``public_key`` must be provided.
+    If ``public_key`` is changed it must not already belong to another repeater.
+    """
+    try:
+        uuid.UUID(repeater_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid repeater ID format")
+
+    if data.name is not None and not data.name.strip():
+        raise HTTPException(status_code=400, detail="name must not be blank")
+    if data.public_key is not None and not data.public_key.strip():
+        raise HTTPException(status_code=400, detail="public_key must not be blank")
+    if data.name is None and data.public_key is None:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of name or public_key must be provided",
+        )
+
+    client = get_client()
+
+    existing = client.query(
+        "SELECT id, name, public_key, password, enabled FROM repeaters FINAL "
+        "WHERE id = {rid:UUID}",
+        parameters={"rid": repeater_id},
+    )
+    if not existing.result_rows:
+        raise HTTPException(status_code=404, detail="Repeater not found")
+
+    row = existing.result_rows[0]
+    current_name: str = row[1]
+    current_public_key: str = row[2]
+    password: str = row[3]
+    enabled: bool = row[4]
+
+    new_name = data.name.strip() if data.name is not None else current_name
+    new_public_key = (
+        data.public_key.strip() if data.public_key is not None else current_public_key
+    )
+
+    if new_public_key != current_public_key:
+        conflict = client.query(
+            "SELECT id FROM repeaters FINAL WHERE public_key = {pk:String}",
+            parameters={"pk": new_public_key},
+        )
+        if conflict.result_rows:
+            raise HTTPException(
+                status_code=409,
+                detail="A repeater with this public_key already exists",
+            )
+
+    now = datetime.now(timezone.utc)
+
+    client.insert(
+        "repeaters",
+        [[repeater_id, new_name, new_public_key, password, enabled, now]],
+        column_names=["id", "name", "public_key", "password", "enabled", "created_at"],
+    )
+
+    logger.info("Updated repeater %s", repeater_id)
+
+    return RepeaterSingleResponse(
+        status="ok",
+        repeater=RepeaterListItem(
+            id=repeater_id,
+            name=new_name,
+            public_key=new_public_key,
+            enabled=enabled,
             created_at=now.isoformat(),
         ),
     )

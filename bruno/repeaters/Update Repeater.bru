@@ -1,0 +1,52 @@
+meta {
+  name: Update Repeater
+  type: http
+  seq: 6
+}
+
+patch {
+  url: {{base_url}}/api/repeaters/{{repeater_id}}
+  body: json
+  auth: none
+}
+
+headers {
+  x-api-token: {{auth_token}}
+}
+
+vars:pre-request {
+  repeater_id: 70218b23-32ff-47dc-a1e1-452b58155674
+}
+
+body:json {
+  {
+    "name": "{{repeater_name}}",
+    "public_key": "{{public_key}}"
+  }
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+
+  test("envelope status is ok", function() {
+    expect(res.body.status).to.equal("ok");
+  });
+
+  test("repeater object present", function() {
+    expect(res.body.repeater).to.be.an("object");
+  });
+
+  test("repeater id is unchanged", function() {
+    expect(res.body.repeater.id).to.equal(env.vars.repeater_id);
+  });
+
+  test("repeater name is updated", function() {
+    expect(res.body.repeater.name).to.equal(env.vars.repeater_name);
+  });
+
+  test("repeater public_key is updated", function() {
+    expect(res.body.repeater.public_key).to.equal(env.vars.public_key);
+  });
+}
