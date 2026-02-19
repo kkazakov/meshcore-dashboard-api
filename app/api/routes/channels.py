@@ -8,6 +8,13 @@ Authentication
 All endpoints require a valid ``x-api-token`` header obtained from
 ``POST /api/login``.
 
+Caching
+-------
+``GET /api/channels`` is served from an in-process cache (12-hour TTL) backed
+by ``app.meshcore.channel_cache``.  The cache is populated on application start
+and is immediately invalidated and refreshed after every successful ``POST`` or
+``DELETE`` so callers always see a consistent state.
+
 Each channel entry contains:
 - ``index``        : channel slot index on the device
 - ``name``         : human-readable channel name
@@ -23,6 +30,12 @@ from pydantic import BaseModel
 
 from app.api.deps import require_token
 from app.meshcore import telemetry_common
+from app.meshcore.channel_cache import (
+    get_cached_channels,
+    invalidate_cache,
+    populate_cache,
+    set_cache,
+)
 from app.meshcore.connection import device_lock
 from meshcore import EventType
 
@@ -118,46 +131,39 @@ async def get_channels(
     Return the list of channels configured on the connected MeshCore companion
     device.
 
-    Iterates channel indices 0 – 7; uninitialised slots are omitted.
+    Responses are served from an in-process cache (12-hour TTL).  The cache is
+    populated on startup and refreshed automatically after every write
+    (create / delete).  A device round-trip is only performed when the cache is
+    cold or expired.
 
     - **401** — invalid or missing ``x-api-token``.
-    - **502** — device connection failed.
+    - **502** — device connection failed (cache cold and device unreachable).
     """
-    config = telemetry_common.load_config()
-    meshcore = None
+    cached = get_cached_channels()
+    if cached is not None:
+        logger.debug("GET /api/channels — cache hit (%d channels)", len(cached))
+        return ChannelsResponse(
+            status="ok",
+            channels=[ChannelInfo(**ch) for ch in cached],
+        )
 
-    async with device_lock:
-        try:
-            try:
-                meshcore = await telemetry_common.connect_to_device(
-                    config, verbose=False
-                )
-            except Exception as exc:
-                logger.error("Failed to connect to MeshCore device: %s", exc)
-                raise HTTPException(
-                    status_code=502,
-                    detail={
-                        "status": "error",
-                        "message": f"Device connection failed: {exc}",
-                    },
-                ) from exc
+    logger.info("GET /api/channels — cache miss, fetching from device")
+    try:
+        channels = await populate_cache()
+    except Exception as exc:
+        logger.error("Failed to fetch channels from device: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "status": "error",
+                "message": f"Device connection failed: {exc}",
+            },
+        ) from exc
 
-            channels = await _fetch_all_channels(meshcore)
-
-            if not channels:
-                logger.info("No channels found on the connected device")
-
-            return ChannelsResponse(
-                status="ok",
-                channels=[ChannelInfo(**ch) for ch in channels],
-            )
-
-        finally:
-            if meshcore:
-                try:
-                    await asyncio.wait_for(meshcore.disconnect(), timeout=5)
-                except Exception:
-                    pass
+    return ChannelsResponse(
+        status="ok",
+        channels=[ChannelInfo(**ch) for ch in channels],
+    )
 
 
 @router.post("/api/channels", response_model=ChannelsResponse, status_code=201)
@@ -171,6 +177,9 @@ async def create_channel(
 
     The channel secret is derived automatically from the name (SHA-256 of the
     name, first 16 bytes — the same algorithm used by MeshCore firmware).
+
+    After a successful write the channel cache is invalidated and immediately
+    refreshed so that the updated list is returned in the response.
 
     - **400** — no free slot available (all 8 slots are occupied).
     - **409** — a channel with the same name already exists.
@@ -274,17 +283,23 @@ async def create_channel(
 
             channels = await _fetch_all_channels(meshcore)
 
-            return ChannelsResponse(
-                status="ok",
-                channels=[ChannelInfo(**ch) for ch in channels],
-            )
-
         finally:
             if meshcore:
                 try:
                     await asyncio.wait_for(meshcore.disconnect(), timeout=5)
                 except Exception:
                     pass
+
+    # Invalidate the stale cache and store the freshly read list so the next
+    # GET is served instantly without another device round-trip.
+    invalidate_cache()
+    set_cache(channels)
+    logger.info("Channel cache refreshed after create (%d channels)", len(channels))
+
+    return ChannelsResponse(
+        status="ok",
+        channels=[ChannelInfo(**ch) for ch in channels],
+    )
 
 
 @router.delete("/api/channels", response_model=ChannelsResponse)
@@ -297,6 +312,9 @@ async def delete_channel(
 
     The slot is cleared by overwriting it with an empty name and a zero secret,
     which is how MeshCore marks a slot as uninitialised.
+
+    After a successful delete the channel cache is invalidated and immediately
+    refreshed so that the updated list is returned in the response.
 
     - **400** — request name is empty.
     - **404** — no channel with that name exists on the device.
@@ -394,14 +412,20 @@ async def delete_channel(
 
             channels = await _fetch_all_channels(meshcore)
 
-            return ChannelsResponse(
-                status="ok",
-                channels=[ChannelInfo(**ch) for ch in channels],
-            )
-
         finally:
             if meshcore:
                 try:
                     await asyncio.wait_for(meshcore.disconnect(), timeout=5)
                 except Exception:
                     pass
+
+    # Invalidate the stale cache and store the freshly read list so the next
+    # GET is served instantly without another device round-trip.
+    invalidate_cache()
+    set_cache(channels)
+    logger.info("Channel cache refreshed after delete (%d channels)", len(channels))
+
+    return ChannelsResponse(
+        status="ok",
+        channels=[ChannelInfo(**ch) for ch in channels],
+    )

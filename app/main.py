@@ -21,6 +21,7 @@ from app.api.routes import status as status_router
 from app.api.routes import telemetry as telemetry_router
 from app.api.routes import websocket as websocket_router
 from app.events import broadcast_task, stop_broadcast_task
+from app.meshcore.channel_cache import populate_cache as populate_channel_cache
 from app.workers.message_poller import run_message_poller
 from app.workers.repeater_telemetry_poller import run_repeater_telemetry_poller
 
@@ -65,6 +66,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _filter = _MeshcoreNoiseFilter()
     for handler in logging.root.handlers:
         handler.addFilter(_filter)
+
+    # Pre-warm the channel cache so the first GET /api/channels is instant.
+    # Failures here are non-fatal — the cache will be populated lazily on the
+    # first request if the device is temporarily unreachable at startup.
+    try:
+        await populate_channel_cache()
+    except Exception as exc:
+        logger.warning(
+            "Could not pre-warm channel cache at startup (will retry on first request): %s",
+            exc,
+        )
 
     poller_task = asyncio.create_task(run_message_poller(), name="message_poller")
     repeater_poller_task = asyncio.create_task(
