@@ -59,6 +59,7 @@ from pydantic import BaseModel
 
 from app.api.deps import require_token
 from app.db.clickhouse import get_client
+from app.events import queue_message
 from app.meshcore import telemetry_common
 from app.meshcore.connection import device_lock
 from meshcore import EventType
@@ -314,6 +315,13 @@ async def send_message(
                 await asyncio.to_thread(_insert_sent_message, sent_row)
             except Exception as exc:
                 logger.warning("Failed to store sent message in ClickHouse: %s", exc)
+
+            try:
+                await queue_message(sent_row)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to queue sent message for WebSocket broadcast: %s", exc
+                )
 
             return SendMessageResponse(
                 status="ok",
