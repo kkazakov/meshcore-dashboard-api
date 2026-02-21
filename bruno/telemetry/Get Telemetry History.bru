@@ -5,15 +5,15 @@ meta {
 }
 
 get {
-  url: {{base_url}}/api/telemetry/history/{{repeater_id}}?from=2026-02-10 00:00:00&to=2026-02-14 00:00:00&keys=battery_voltage,battery_percentage
+  url: {{base_url}}/api/telemetry/history/{{repeater_id}}?from=2026-02-21 00:00:00&to=2026-02-22 00:00:00&keys=battery_voltage,battery_percentage,temperature_c,pressure_hpa,humidity_pct
   body: none
   auth: none
 }
 
 params:query {
-  from: 2026-02-10 00:00:00
-  to: 2026-02-14 00:00:00
-  keys: battery_voltage,battery_percentage
+  from: 2026-02-21 00:00:00
+  to: 2026-02-22 00:00:00
+  keys: battery_voltage,battery_percentage,temperature_c,pressure_hpa,humidity_pct
 }
 
 headers {
