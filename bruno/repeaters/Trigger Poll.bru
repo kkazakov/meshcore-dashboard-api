@@ -1,0 +1,29 @@
+meta {
+  name: Trigger Poll
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{base_url}}/api/repeaters/poll
+  body: none
+  auth: none
+}
+
+headers {
+  x-api-token: {{auth_token}}
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+
+  test("envelope status is ok", function() {
+    expect(res.body.status).to.equal("ok");
+  });
+
+  test("message confirms background start", function() {
+    expect(res.body.message).to.be.a("string");
+  });
+}

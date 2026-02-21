@@ -6,6 +6,7 @@ Authentication
 All endpoints require a valid ``x-api-token`` header obtained from ``POST /api/login``.
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ from pydantic import BaseModel
 
 from app.api.deps import require_token
 from app.db.clickhouse import get_client
+from app.meshcore import telemetry_common
+from app.workers.repeater_telemetry_poller import _poll_all_repeaters
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,11 @@ class RepeaterListResponse(BaseModel):
 class RepeaterSingleResponse(BaseModel):
     status: str
     repeater: RepeaterListItem
+
+
+class PollResponse(BaseModel):
+    status: str
+    message: str
 
 
 @router.get("/api/repeaters", response_model=RepeaterListResponse)
@@ -138,6 +146,23 @@ def add_repeater(
             created_at=now.isoformat(),
         ),
     )
+
+
+@router.post("/api/repeaters/poll", response_model=PollResponse)
+async def trigger_poll(_email: str = Depends(require_token)) -> PollResponse:
+    """
+    Manually trigger an immediate repeater telemetry poll cycle.
+
+    Returns immediately — the poll runs in the background.  Check the server
+    logs to see the result.
+
+    - **200** — poll accepted and queued.
+    - **401** — invalid or missing ``x-api-token``.
+    """
+    config = telemetry_common.load_config()
+    asyncio.create_task(_poll_all_repeaters(config))
+    logger.info("Manual poll triggered — running in background")
+    return PollResponse(status="ok", message="Poll started in background")
 
 
 @router.patch("/api/repeaters/{repeater_id}", response_model=RepeaterSingleResponse)
