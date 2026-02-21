@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import os
 import sys
 from dotenv import load_dotenv
 from meshcore import MeshCore, EventType, BinaryReqType
+
+logger = logging.getLogger(__name__)
 
 
 def load_config():
@@ -415,6 +418,179 @@ async def get_status(meshcore, contact, password, verbose=True, max_retries=3):
                 if verbose:
                     print(f"ERROR: Failed to get status after all retries: {e}")
                 return None
+
+    return None
+
+
+def lpp_to_sensors(lpp_data: list) -> dict:
+    """
+    Convert a parsed LPP (Cayenne Low Power Payload) list into a flat sensor dict.
+
+    The meshcore library returns TELEMETRY_RESPONSE payloads as a list of dicts::
+
+        [{"channel": 1, "type": {"...": ...}, "value": 23.5}, ...]
+
+    LPP type names used here match those in ``meshcore/lpp_json_encoder.py``:
+      - ``"temperature"``  → °C
+      - ``"humidity"``     → %
+      - ``"barometer"``    → hPa
+
+    Only the first occurrence of each sensor type is used (in case a device
+    reports multiple channels for the same quantity).
+    """
+    sensors: dict = {}
+
+    if not lpp_data:
+        return sensors
+
+    for entry in lpp_data:
+        # The "type" field may be a string (type name) or a dict; normalise to str.
+        type_name: str = ""
+        raw_type = entry.get("type", "")
+        if isinstance(raw_type, str):
+            type_name = raw_type
+        elif isinstance(raw_type, dict):
+            # Some versions encode as {"name": "temperature", ...}
+            type_name = raw_type.get("name", str(raw_type))
+
+        value = entry.get("value")
+
+        if type_name == "temperature" and "temperature_c" not in sensors:
+            try:
+                sensors["temperature_c"] = round(float(value), 2)
+            except (TypeError, ValueError):
+                logger.debug("Could not parse temperature value: %r", value)
+
+        elif type_name == "humidity" and "humidity_pct" not in sensors:
+            try:
+                sensors["humidity_pct"] = round(float(value), 2)
+            except (TypeError, ValueError):
+                logger.debug("Could not parse humidity value: %r", value)
+
+        elif type_name == "barometer" and "pressure_hpa" not in sensors:
+            try:
+                sensors["pressure_hpa"] = round(float(value), 2)
+            except (TypeError, ValueError):
+                logger.debug("Could not parse pressure value: %r", value)
+
+    return sensors
+
+
+async def get_sensor_telemetry(
+    meshcore, contact, verbose: bool = True, max_retries: int = 3
+) -> dict | None:
+    """
+    Request sensor telemetry (temperature, humidity, pressure) from a contact.
+
+    Uses ``BinaryReqType.TELEMETRY`` → waits for ``EventType.TELEMETRY_RESPONSE``.
+    The response payload contains an ``"lpp"`` key with a list of LPP-encoded
+    sensor readings.
+
+    Returns a dict with zero or more of:
+      ``temperature_c``, ``humidity_pct``, ``pressure_hpa``
+
+    Returns ``None`` if the request times out or the device does not support it,
+    and an empty dict ``{}`` if the device responded but reported no sensor data.
+    """
+    contact_data = contact["data"]
+    pubkey_prefix = (
+        contact_data.get("public_key", "")[:12]
+        if contact_data.get("public_key")
+        else None
+    )
+
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                if verbose:
+                    print(f"Sensor telemetry retry {attempt + 1}/{max_retries}...")
+                await asyncio.sleep(2)
+
+            await meshcore.commands.send_binary_req(
+                contact_data, BinaryReqType.TELEMETRY
+            )
+
+            if verbose:
+                print("Sensor telemetry request sent, waiting for response...")
+
+            timeout = 20
+
+            # Try filtering by pubkey_prefix if available; fall back to unfiltered.
+            if pubkey_prefix:
+                result = await meshcore.wait_for_event(
+                    EventType.TELEMETRY_RESPONSE,
+                    attribute_filters={"pubkey_prefix": pubkey_prefix},
+                    timeout=timeout,
+                )
+            else:
+                result = await meshcore.wait_for_event(
+                    EventType.TELEMETRY_RESPONSE, timeout=timeout
+                )
+
+            if result is None:
+                logger.debug(
+                    "No TELEMETRY_RESPONSE from %s (attempt %d/%d) — "
+                    "device may not support sensor telemetry",
+                    contact["name"],
+                    attempt + 1,
+                    max_retries,
+                )
+                if attempt < max_retries - 1:
+                    continue
+                return None
+
+            payload = result.payload if hasattr(result, "payload") else result
+            logger.debug(
+                "Raw TELEMETRY_RESPONSE payload from %s: %r", contact["name"], payload
+            )
+
+            lpp_data = None
+            if isinstance(payload, dict):
+                lpp_data = payload.get("lpp")
+            elif isinstance(payload, list):
+                lpp_data = payload
+
+            if lpp_data is None:
+                logger.debug(
+                    "TELEMETRY_RESPONSE from %s had no 'lpp' key; payload keys: %s",
+                    contact["name"],
+                    list(payload.keys())
+                    if isinstance(payload, dict)
+                    else type(payload),
+                )
+                return {}
+
+            sensors = lpp_to_sensors(lpp_data)
+            if verbose:
+                if sensors:
+                    print(f"Sensor readings: {sensors}")
+                else:
+                    print(
+                        "No sensor readings in telemetry response (device may lack sensors)"
+                    )
+            return sensors
+
+        except asyncio.TimeoutError:
+            logger.debug(
+                "Sensor telemetry timeout for %s (attempt %d/%d)",
+                contact["name"],
+                attempt + 1,
+                max_retries,
+            )
+            if attempt < max_retries - 1:
+                continue
+            return None
+        except Exception as exc:
+            logger.warning(
+                "Sensor telemetry error for %s (attempt %d/%d): %s",
+                contact["name"],
+                attempt + 1,
+                max_retries,
+                exc,
+            )
+            if attempt < max_retries - 1:
+                continue
+            return None
 
     return None
 

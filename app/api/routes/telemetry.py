@@ -136,6 +136,24 @@ async def get_telemetry(
                 contact_name=contact["name"],
                 public_key=contact["data"].get("public_key"),
             )
+
+            # Attempt to fetch sensor telemetry (temperature, humidity, pressure).
+            # This is a separate BinaryReqType.TELEMETRY request.  Not all devices
+            # support it, so a None/empty result is treated as non-fatal.
+            sensors = await telemetry_common.get_sensor_telemetry(
+                meshcore, contact, verbose=False, max_retries=2
+            )
+            if sensors:
+                result["sensors"] = sensors
+            else:
+                # Include the key with null so clients know it was attempted
+                result["sensors"] = None
+                if sensors is None:
+                    logger.debug(
+                        "No sensor telemetry response from %s — device may not support it",
+                        contact["name"],
+                    )
+
             return TelemetryResponse(status="ok", data=result)
 
         finally:

@@ -146,11 +146,44 @@ async def _fetch_repeater_telemetry(
             )
 
             logger.debug(
-                "Fetched telemetry from %s: battery_voltage=%.3fV, battery_percentage=%.1f%%",
+                "Fetched status from %s: battery_voltage=%.3fV, battery_percentage=%.1f%%",
                 repeater_name,
                 bat_v,
                 bat_pct,
             )
+
+            # Attempt to fetch sensor telemetry (temperature, humidity, pressure).
+            # Not all devices support this; failures are non-fatal.
+            sensors = await telemetry_common.get_sensor_telemetry(
+                meshcore, contact, verbose=False, max_retries=2
+            )
+            if sensors:
+                sensor_key_map = {
+                    "temperature_c": "temperature_c",
+                    "humidity_pct": "humidity_pct",
+                    "pressure_hpa": "pressure_hpa",
+                }
+                for field, metric_key in sensor_key_map.items():
+                    if field in sensors:
+                        rows.append(
+                            {
+                                "recorded_at": recorded_at,
+                                "repeater_id": repeater_id,
+                                "repeater_name": repeater_name,
+                                "metric_key": metric_key,
+                                "metric_value": sensors[field],
+                            }
+                        )
+                logger.debug(
+                    "Fetched sensor telemetry from %s: %s",
+                    repeater_name,
+                    sensors,
+                )
+            elif sensors is None:
+                logger.debug(
+                    "No sensor telemetry response from %s — device may not support it",
+                    repeater_name,
+                )
 
             return rows
 
