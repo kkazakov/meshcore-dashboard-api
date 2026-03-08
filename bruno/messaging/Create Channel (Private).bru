@@ -1,7 +1,7 @@
 meta {
-  name: Create Channel (Public)
+  name: Create Channel (Private)
   type: http
-  seq: 2
+  seq: 3
 }
 
 post {
@@ -16,18 +16,19 @@ headers {
 
 body:json {
   {
-    "name": "#public"
+    "name": "private-team",
+    "password": "my-super-secret-password"
   }
 }
 
 docs {
-  ## Create Public Channel
+  ## Create Private Channel
   
-  Creates a new public channel with a # prefix. The secret is auto-generated
-  from the channel name using SHA-256, meaning anyone who creates a channel
-  with the same name will get the same secret.
+  Creates a new private channel with a custom password. The secret is derived
+  from the password using SHA-256, ensuring only those who know the password
+  can communicate on the channel.
   
-  Do not provide a password field for public channels.
+  The password field is required for private channels.
   
   ### Response
   
@@ -54,7 +55,7 @@ tests {
   
   test("new channel is present in response", function() {
     const names = res.body.channels.map(function(ch) { return ch.name; });
-    expect(names).to.include("#public");
+    expect(names).to.include("private-team");
   });
   
   test("each channel has required fields", function() {
@@ -63,5 +64,13 @@ tests {
       expect(ch).to.have.property("name");
       expect(ch).to.have.property("secret_hex");
     });
+  });
+  
+  test("private channel secret is password-derived", function() {
+    const privateChannel = res.body.channels.find(function(ch) {
+      return ch.name === "private-team";
+    });
+    // Password-derived secret should be: SHA256("my-super-secret-password")[0:16]
+    expect(privateChannel.secret_hex).to.equal("da0fafa85358cf6a2aedbbf94c6d62fc");
   });
 }

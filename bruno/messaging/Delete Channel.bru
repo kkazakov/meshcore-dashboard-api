@@ -1,7 +1,7 @@
 meta {
   name: Delete Channel
   type: http
-  seq: 3
+  seq: 4
 }
 
 delete {
@@ -16,8 +16,27 @@ headers {
 
 body:json {
   {
-    "name": "test2"
+    "name": "#public"
   }
+}
+
+docs {
+  ## Delete Channel
+  
+  Removes a channel by name from the connected MeshCore companion device.
+  The slot is cleared by overwriting it with an empty name and zero secret,
+  making it available for new channels.
+  
+  Channel name matching is case-insensitive.
+  
+  ### Response
+  
+  - **200** — Channel deleted successfully
+  - **400** — Empty channel name
+  - **401** — Missing / invalid token
+  - **404** — Channel not found on device
+  - **502** — Device connection failed
+  - **504** — Device did not acknowledge
 }
 
 tests {
@@ -35,6 +54,14 @@ tests {
   
   test("deleted channel is no longer present", function() {
     const names = res.body.channels.map(function(ch) { return ch.name; });
-    expect(names).to.not.include("MyChannel");
+    expect(names).to.not.include("#public");
+  });
+  
+  test("each channel has required fields", function() {
+    res.body.channels.forEach(function(ch) {
+      expect(ch).to.have.property("index");
+      expect(ch).to.have.property("name");
+      expect(ch).to.have.property("secret_hex");
+    });
   });
 }

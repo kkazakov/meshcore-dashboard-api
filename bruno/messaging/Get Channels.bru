@@ -14,6 +14,19 @@ headers {
   x-api-token: {{auth_token}}
 }
 
+docs {
+  ## Get Channels
+  
+  Returns all configured channels from the connected MeshCore companion device.
+  Served from an in-process cache (12-hour TTL) for optimal performance.
+  
+  ### Response
+  
+  - **200** — Success
+  - **401** — Missing / invalid token
+  - **502** — Device connection failed (when cache is cold)
+}
+
 tests {
   test("status 200", function() {
     expect(res.status).to.equal(200);
