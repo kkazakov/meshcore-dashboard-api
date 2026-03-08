@@ -524,31 +524,106 @@ Returns `200` on success, `404` if not found.
 | `POST` | `/api/channels` | x-api-token | Create a new channel on the next free slot |
 | `DELETE` | `/api/channels` | x-api-token | Delete a channel by name |
 
-**GET /api/channels — response**
+#### GET /api/channels — list channels
+
+Returns all configured channels from the connected MeshCore companion device.
+
+**Response**
 ```json
 {
   "status": "ok",
   "channels": [
-    { "index": 0, "name": "General", "secret_hex": "0a1b2c3d…" },
-    { "index": 1, "name": "Admin",   "secret_hex": "ff00aa11…" }
+    { "index": 0, "name": "#public", "secret_hex": "8b4b705b080c0d943b1c80f6b3ef6b6d" },
+    { "index": 1, "name": "team-alpha", "secret_hex": "29c4834a95b3703f05bda3e949d345d7" }
   ]
 }
 ```
 
-**POST /api/channels — request**
-```json
-{ "name": "MyChannel" }
-```
-Returns `201` with the full updated channel list.
-Returns `409` if a channel with that name already exists.
-Returns `400` if all 8 slots are occupied.
+| Code | Reason |
+|---|---|
+| `200` | Success (served from cache if available) |
+| `401` | Missing / invalid token |
+| `502` | Device connection failed (cache cold) |
 
-**DELETE /api/channels — request**
+---
+
+#### POST /api/channels — create a channel
+
+Creates a new channel on the next available slot (max 8 channels). Supports three modes:
+
+**1. Public channel (# prefix)**
+
+The secret is auto-generated from the channel name. Anyone creating a channel with the same name will get the same secret.
+
 ```json
-{ "name": "MyChannel" }
+{ "name": "#public" }
 ```
-Returns `200` with the full updated channel list (deleted channel absent).
-Returns `404` if the channel name is not found.
+
+**2. Private channel with password**
+
+The secret is derived from the password. Only those who know the password can communicate on the channel.
+
+```json
+{ "name": "private-team", "password": "my-super-secret-password" }
+```
+
+**3. Name-based channel (no password)**
+
+Legacy mode — secret is auto-generated from the name (same as public channels).
+
+```json
+{ "name": "team-alpha" }
+```
+
+**Response** — `201` with the full updated channel list
+```json
+{
+  "status": "ok",
+  "channels": [
+    { "index": 0, "name": "#public", "secret_hex": "8b4b705b080c0d943b1c80f6b3ef6b6d" },
+    { "index": 1, "name": "private-team", "secret_hex": "da0fafa85358cf6a2aedbbf94c6d62fc" }
+  ]
+}
+```
+
+| Code | Reason |
+|---|---|
+| `201` | Channel created successfully |
+| `400` | Empty name, no free slots, or invalid configuration |
+| `401` | Missing / invalid token |
+| `409` | Channel with that name already exists |
+| `502` | Device connection failed |
+| `504` | Device did not acknowledge the write |
+
+---
+
+#### DELETE /api/channels — delete a channel
+
+Removes a channel by name. The slot is cleared and becomes available for new channels.
+
+**Request**
+```json
+{ "name": "#public" }
+```
+
+**Response** — `200` with the full updated channel list (deleted channel absent)
+```json
+{
+  "status": "ok",
+  "channels": [
+    { "index": 1, "name": "private-team", "secret_hex": "da0fafa85358cf6a2aedbbf94c6d62fc" }
+  ]
+}
+```
+
+| Code | Reason |
+|---|---|
+| `200` | Channel deleted successfully |
+| `400` | Empty channel name |
+| `401` | Missing / invalid token |
+| `404` | Channel not found on device |
+| `502` | Device connection failed |
+| `504` | Device did not acknowledge the delete |
 
 ---
 

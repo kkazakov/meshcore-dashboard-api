@@ -79,6 +79,141 @@ def test_telemetry_neither_name_nor_key_returns_400():
     assert response.status_code == 400
 
 
+# ── Live telemetry happy-path tests ──────────────────────────────────────────
+
+
+def test_telemetry_returns_sensors_when_available():
+    """Sensor data (temperature, humidity, pressure) appears under 'sensors' key."""
+    fake_status = {
+        "bat": 4000,
+        "uptime": 3600,
+        "noise_floor": -90,
+        "last_rssi": -60,
+        "last_snr": 8,
+        "tx_queue_len": 0,
+        "full_evts": 0,
+        "nb_sent": 5,
+        "sent_flood": 3,
+        "sent_direct": 2,
+        "nb_recv": 10,
+        "recv_flood": 7,
+        "recv_direct": 3,
+        "direct_dups": 0,
+        "flood_dups": 1,
+        "airtime": 5,
+        "rx_airtime": 12,
+        "pubkey_pre": "aabbcc112233",
+        "public_key": "aabbcc1122334455",
+    }
+    fake_sensors = {
+        "temperature_c": 22.5,
+        "humidity_pct": 55.0,
+        "pressure_hpa": 1013.25,
+    }
+    fake_contact = {
+        "id": "contact-1",
+        "name": "TestRepeater",
+        "data": {"public_key": "aabbcc1122334455"},
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.disconnect = AsyncMock()
+
+    with (
+        _valid_token(),
+        patch("app.api.routes.telemetry.telemetry_common.load_config", return_value={}),
+        patch(
+            "app.api.routes.telemetry.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+        patch(
+            "app.api.routes.telemetry.telemetry_common.find_contact_by_name",
+            new=AsyncMock(return_value=fake_contact),
+        ),
+        patch(
+            "app.api.routes.telemetry.telemetry_common.get_status",
+            new=AsyncMock(return_value=fake_status),
+        ),
+        patch(
+            "app.api.routes.telemetry.telemetry_common.get_sensor_telemetry",
+            new=AsyncMock(return_value=fake_sensors),
+        ),
+    ):
+        response = client.get(
+            "/api/telemetry?repeater_name=TestRepeater",
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    sensors = body["data"]["sensors"]
+    assert sensors["temperature_c"] == 22.5
+    assert sensors["humidity_pct"] == 55.0
+    assert sensors["pressure_hpa"] == 1013.25
+
+
+def test_telemetry_sensors_null_when_unavailable():
+    """'sensors' key is null when device does not support sensor telemetry."""
+    fake_status = {
+        "bat": 4000,
+        "uptime": 3600,
+        "noise_floor": -90,
+        "last_rssi": -60,
+        "last_snr": 8,
+        "tx_queue_len": 0,
+        "full_evts": 0,
+        "nb_sent": 5,
+        "sent_flood": 3,
+        "sent_direct": 2,
+        "nb_recv": 10,
+        "recv_flood": 7,
+        "recv_direct": 3,
+        "direct_dups": 0,
+        "flood_dups": 1,
+        "airtime": 5,
+        "rx_airtime": 12,
+        "pubkey_pre": "aabbcc112233",
+        "public_key": "aabbcc1122334455",
+    }
+    fake_contact = {
+        "id": "contact-1",
+        "name": "TestRepeater",
+        "data": {"public_key": "aabbcc1122334455"},
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.disconnect = AsyncMock()
+
+    with (
+        _valid_token(),
+        patch("app.api.routes.telemetry.telemetry_common.load_config", return_value={}),
+        patch(
+            "app.api.routes.telemetry.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+        patch(
+            "app.api.routes.telemetry.telemetry_common.find_contact_by_name",
+            new=AsyncMock(return_value=fake_contact),
+        ),
+        patch(
+            "app.api.routes.telemetry.telemetry_common.get_status",
+            new=AsyncMock(return_value=fake_status),
+        ),
+        patch(
+            "app.api.routes.telemetry.telemetry_common.get_sensor_telemetry",
+            new=AsyncMock(return_value=None),  # device does not support it
+        ),
+    ):
+        response = client.get(
+            "/api/telemetry?repeater_name=TestRepeater",
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["data"]["sensors"] is None
+
+
 # ── Telemetry history tests ───────────────────────────────────────────────────
 
 
