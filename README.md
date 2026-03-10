@@ -327,6 +327,111 @@ Interactive API docs: `http://localhost:8000/docs`
 
 ---
 
+## Running locally with Docker Compose (all-in-one)
+
+The `docker-aio/` directory contains a single Docker Compose stack that brings up the full project — ClickHouse, API, and front-end — with a single command. No local Python environment or manually installed ClickHouse is needed.
+
+### What it runs
+
+| Service | Host port | URL |
+|---|---|---|
+| Front-end (nginx) | 8080 | http://localhost:8080 |
+| API (FastAPI) | 8000 | http://localhost:8000/docs |
+| ClickHouse HTTP | 8123 | — |
+| ClickHouse native | 9000 | — |
+
+### Quick start
+
+```bash
+cd docker-aio/
+docker compose up --build
+```
+
+Both the API and front-end images are built directly from their GitHub repositories — no local clones required. ClickHouse initialises on first start: the database and all tables are created automatically via `clickhouse/initdb.d/00_init.sql`.
+
+A default admin account is seeded on first run:
+
+| Field | Value |
+|---|---|
+| Email | `admin@example.com` |
+| Password | `admin` |
+
+Change the password after first login.
+
+### Configuration
+
+Copy `.env.example` to `.env` (a development-ready `.env` is already provided) and edit as needed before running `docker compose up`.
+
+#### ClickHouse
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLICKHOUSE_DB` | `meshcore_dashboard` | Database name to create and use |
+| `CLICKHOUSE_USER` | `meshcore` | ClickHouse username |
+| `CLICKHOUSE_PASSWORD` | `meshcore_secret` | ClickHouse password |
+
+#### API — MeshCore device connection
+
+The API will start even without a physical radio device attached; it logs a connection error but all HTTP and WebSocket endpoints remain functional. Set `CONNECTION_TYPE` to whichever transport your device uses.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CONNECTION_TYPE` | `tcp` | Transport: `ble`, `serial`, or `tcp` |
+| `TCP_HOST` | `192.168.1.100` | IP of the MeshCore Wi-Fi companion |
+| `TCP_PORT` | `4000` | TCP port of the companion device |
+| `BLE_ADDRESS` | *(empty)* | BLE MAC address — leave blank to auto-scan |
+| `BLE_PIN` | *(empty)* | Optional 6-digit BLE pairing PIN |
+| `SERIAL_PORT` | `/dev/ttyUSB0` | Serial device path |
+| `SERIAL_BAUDRATE` | `115200` | Serial baud rate |
+| `DEBUG` | `true` | Enable verbose MeshCore debug logging |
+| `REPEATER_POLL_INTERVAL` | `600` | Repeater telemetry polling interval (seconds) |
+
+#### Front-end
+
+These two values are **baked into the nginx image at build time** (via `sed` in the FE Dockerfile). If you change them after the first build, you must rebuild the `fe` service:
+
+```bash
+docker compose build --no-cache fe
+docker compose up fe
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_ENDPOINT` | `http://localhost:8000` | API base URL as seen from the browser |
+| `WS_ENDPOINT` | `ws://localhost:8000` | WebSocket base URL as seen from the browser |
+
+Both must point to the same host — only the scheme differs (`http` → `ws`).
+
+### Useful commands
+
+```bash
+# Start the full stack (build images on first run)
+docker compose up --build
+
+# Start in detached (background) mode
+docker compose up --build -d
+
+# Stop the stack
+docker compose down
+
+# Stop and delete all data (ClickHouse volume)
+docker compose down -v
+
+# Rebuild a single service after a code change
+docker compose build --no-cache api
+docker compose up api
+
+# Follow logs for a single service
+docker compose logs -f api
+
+# Open a ClickHouse SQL shell
+docker compose exec clickhouse clickhouse-client \
+  --user meshcore --password meshcore_secret \
+  --database meshcore_dashboard
+```
+
+---
+
 ## Configuration
 
 All settings are read from `.env` (see `.env.example` for the full template).

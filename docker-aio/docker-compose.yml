@@ -49,9 +49,12 @@ services:
   # ── API ─────────────────────────────────────────────────────────────────────
   api:
     build:
-      context:
-        https://github.com/kkazakov/meshcore-dashboard-api.git#master
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: Dockerfile.api
+      # To pin a specific branch or fork, override these args:
+      # args:
+      #   API_REPO: https://github.com/kkazakov/meshcore-dashboard-api.git
+      #   API_BRANCH: master
     container_name: meshcore-api
     environment:
       # MeshCore device (no physical device in local dev — API still starts)
