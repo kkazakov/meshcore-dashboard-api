@@ -1,0 +1,101 @@
+###############################################################################
+# Meshcore Dashboard — All-in-One Development Stack
+#
+# Services
+# ────────
+#   clickhouse   – ClickHouse 24 database (HTTP :8123, native :9000)
+#   api          – meshcore-dashboard-api  (FastAPI, port :8000)
+#   fe           – meshcore-dashboard-fe   (nginx, port :8080)
+#
+# Quick start
+# ───────────
+#   cd docker-aio/
+#   docker compose up --build
+#
+# Default credentials
+# ───────────────────
+#   ClickHouse user : meshcore  /  meshcore_secret
+#   API admin login : admin@example.com  /  admin
+#   Front-end URL   : http://localhost:8080
+#   API docs        : http://localhost:8000/docs
+###############################################################################
+
+services:
+
+  # ── ClickHouse ──────────────────────────────────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24
+    container_name: meshcore-clickhouse
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-meshcore_dashboard}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-meshcore}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-meshcore_secret}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: ${CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT:-1}
+    ports:
+      - "8123:8123"   # HTTP interface (used by clickhouse-connect)
+      - "9000:9000"   # Native TCP interface
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      # SQL files in initdb.d/ are executed once on first start, in filename order
+      - ./clickhouse/initdb.d:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user=${CLICKHOUSE_USER:-meshcore} --password=${CLICKHOUSE_PASSWORD:-meshcore_secret} --query='SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── API ─────────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context:
+        https://github.com/kkazakov/meshcore-dashboard-api.git#master
+      dockerfile: Dockerfile
+    container_name: meshcore-api
+    environment:
+      # MeshCore device (no physical device in local dev — API still starts)
+      CONNECTION_TYPE: ${CONNECTION_TYPE:-tcp}
+      TCP_HOST: ${TCP_HOST:-192.168.1.100}
+      TCP_PORT: ${TCP_PORT:-4000}
+      BLE_ADDRESS: ${BLE_ADDRESS:-}
+      BLE_PIN: ${BLE_PIN:-}
+      SERIAL_PORT: ${SERIAL_PORT:-/dev/ttyUSB0}
+      SERIAL_BAUDRATE: ${SERIAL_BAUDRATE:-115200}
+      DEBUG: ${DEBUG:-true}
+      # ClickHouse — service name as hostname inside the Docker network
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-meshcore_dashboard}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-meshcore}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-meshcore_secret}
+      # Poller
+      REPEATER_POLL_INTERVAL: ${REPEATER_POLL_INTERVAL:-600}
+    ports:
+      - "8000:8080"   # API exposed on host :8000 (container listens on :8080)
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Front-end ───────────────────────────────────────────────────────────────
+  fe:
+    build:
+      context:
+        https://github.com/kkazakov/meshcore-dashboard-fe.git#master
+      dockerfile: Dockerfile
+      args:
+        # Both must point to the API as seen from the *browser* (host machine)
+        API_ENDPOINT: ${API_ENDPOINT:-http://localhost:8000}
+        WS_ENDPOINT: ${WS_ENDPOINT:-ws://localhost:8000}
+    container_name: meshcore-fe
+    ports:
+      - "8080:80"     # Dashboard available at http://localhost:8080
+    depends_on:
+      - api
+    restart: unless-stopped
+
+# ── Named volumes ────────────────────────────────────────────────────────────
+volumes:
+  clickhouse-data:
+    driver: local
