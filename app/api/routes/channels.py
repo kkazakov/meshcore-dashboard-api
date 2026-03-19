@@ -298,8 +298,8 @@ async def create_channel(
                 try:
                     client = get_client()
                     result = client.query(
-                        "SELECT deleted FROM channel_config WHERE channel_name = ?",
-                        [channel_name],
+                        "SELECT deleted FROM channel_config WHERE channel_name = {name:String}",
+                        parameters={"name": channel_name},
                     )
                     if result.result_rows and result.result_rows[0][0]:
                         # Channel was soft-deleted, restore it
@@ -311,9 +311,9 @@ async def create_channel(
                         client.command(
                             """
                             INSERT INTO channel_config (channel_name, deleted, updated_at)
-                            VALUES (?, false, now64())
+                            VALUES ({name:String}, false, now64())
                             """,
-                            [channel_name],
+                            parameters={"name": channel_name},
                         )
                         invalidate_cache()
                         channels = await _fetch_all_channels(meshcore)
@@ -435,9 +435,9 @@ async def delete_channel(
             client.command(
                 """
                 INSERT INTO channel_config (channel_name, deleted, updated_at)
-                VALUES (?, true, now64())
+                VALUES ({name:String}, true, now64())
                 """,
-                [channel_name],
+                parameters={"name": channel_name},
             )
             logger.info("Soft-deleted channel '%s'", channel_name)
             invalidate_cache()
