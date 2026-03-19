@@ -29,6 +29,13 @@ a channel with the same name will get the same secret.
 **Private Channels**: Provide a custom ``password`` in the request. The secret
 is derived from the password using SHA-256, ensuring only those who know the
 password can communicate on the channel.
+
+Soft Delete
+-----------
+The DELETE endpoint supports soft delete via the ``soft`` parameter. When set
+to ``true``, the channel is marked as deleted in the ``channel_config`` table
+without clearing the slot on the device. This allows for quick restoration by
+re-creating the channel with the same name.
 """
 
 import asyncio
@@ -40,6 +47,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api.deps import require_token
+from app.db.clickhouse import get_client
 from app.meshcore import telemetry_common
 from app.meshcore.channel_cache import (
     get_cached_channels,
@@ -79,6 +87,7 @@ class CreateChannelRequest(BaseModel):
 
 class DeleteChannelRequest(BaseModel):
     name: str
+    soft: bool = False
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -195,6 +204,11 @@ async def create_channel(
     derived from the password using SHA-256, ensuring only those who know the
     password can access the channel.
 
+    **Restoring Soft-Deleted Channels**: If a channel with the same name exists
+    on the device and was previously soft-deleted (marked in ``channel_config``
+    table), this endpoint will restore it by setting ``deleted=false`` without
+    re-writing the slot.
+
     After a successful write the channel cache is invalidated and immediately
     refreshed so that the updated list is returned in the response.
 
@@ -249,6 +263,7 @@ async def create_channel(
 
             # Read all slots to find duplicates and the first free slot.
             free_slot: int | None = None
+            existing_idx: int | None = None
 
             for idx in range(_MAX_CHANNEL_SLOTS):
                 try:
@@ -275,13 +290,54 @@ async def create_channel(
                     continue
 
                 if name.lower() == channel_name.lower():
-                    raise HTTPException(
-                        status_code=409,
-                        detail={
-                            "status": "error",
-                            "message": f"Channel '{name}' already exists at index {idx}",
-                        },
+                    existing_idx = idx
+                    break
+
+            # Check if channel exists in channel_config with deleted=true
+            if existing_idx is not None:
+                try:
+                    client = get_client()
+                    result = client.query(
+                        "SELECT deleted FROM channel_config WHERE channel_name = ?",
+                        [channel_name],
                     )
+                    if result.result_rows and result.result_rows[0][0]:
+                        # Channel was soft-deleted, restore it
+                        logger.info(
+                            "Restoring soft-deleted channel '%s' at slot %d",
+                            channel_name,
+                            existing_idx,
+                        )
+                        client.command(
+                            """
+                            INSERT INTO channel_config (channel_name, deleted, updated_at)
+                            VALUES (?, false, now64())
+                            """,
+                            [channel_name],
+                        )
+                        invalidate_cache()
+                        channels = await _fetch_all_channels(meshcore)
+                        set_cache(channels)
+                        logger.info(
+                            "Channel cache refreshed after restore (%d channels)",
+                            len(channels),
+                        )
+                        return ChannelsResponse(
+                            status="ok",
+                            channels=[ChannelInfo(**ch) for ch in channels],
+                        )
+                except Exception as exc:
+                    logger.error("Error checking channel_config: %s", exc)
+
+            # Channel exists on device and wasn't soft-deleted
+            if existing_idx is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "status": "error",
+                        "message": f"Channel '{channel_name}' already exists at index {existing_idx}",
+                    },
+                )
 
             if free_slot is None:
                 raise HTTPException(
@@ -347,8 +403,13 @@ async def delete_channel(
     """
     Delete a channel by name from the connected MeshCore companion device.
 
-    The slot is cleared by overwriting it with an empty name and a zero secret,
-    which is how MeshCore marks a slot as uninitialised.
+    **Hard Delete (default)**: Clears the slot by overwriting it with an empty
+    name and a zero secret, which is how MeshCore marks a slot as uninitialised.
+
+    **Soft Delete**: Set ``soft=true`` in the request to mark the channel as
+    deleted in the ``channel_config`` table without touching the device. The
+    channel slot remains intact and can be restored by re-creating a channel
+    with the same name.
 
     After a successful delete the channel cache is invalidated and immediately
     refreshed so that the updated list is returned in the response.
@@ -356,6 +417,7 @@ async def delete_channel(
     - **400** — request name is empty.
     - **404** — no channel with that name exists on the device.
     - **401** — invalid or missing ``x-api-token``.
+    - **500** — soft delete failed (database error).
     - **502** — device connection failed or write was rejected.
     - **504** — device did not acknowledge the delete.
     """
@@ -365,6 +427,39 @@ async def delete_channel(
             status_code=400,
             detail={"status": "error", "message": "Channel name must not be empty"},
         )
+
+    # Soft delete: mark as deleted in channel_config without touching the device
+    if payload.soft:
+        try:
+            client = get_client()
+            client.command(
+                """
+                INSERT INTO channel_config (channel_name, deleted, updated_at)
+                VALUES (?, true, now64())
+                """,
+                [channel_name],
+            )
+            logger.info("Soft-deleted channel '%s'", channel_name)
+            invalidate_cache()
+            channels = await populate_cache()
+            set_cache(channels)
+            logger.info(
+                "Channel cache refreshed after soft delete (%d channels)",
+                len(channels),
+            )
+            return ChannelsResponse(
+                status="ok",
+                channels=[ChannelInfo(**ch) for ch in channels],
+            )
+        except Exception as exc:
+            logger.error("Failed to soft-delete channel: %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "status": "error",
+                    "message": f"Failed to soft-delete channel: {exc}",
+                },
+            ) from exc
 
     config = telemetry_common.load_config()
     meshcore = None
