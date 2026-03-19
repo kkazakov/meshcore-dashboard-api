@@ -98,6 +98,34 @@ def _is_empty_slot(name: str, secret_hex: str) -> bool:
     return not name and all(c == "0" for c in secret_hex)
 
 
+def _filter_soft_deleted_channels(
+    channels: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Filter out channels that are marked as deleted in channel_config.
+
+    Queries the channel_config table for deleted channels and excludes them
+    from the response.
+    """
+    if not channels:
+        return channels
+
+    try:
+        client = get_client()
+        channel_names = [ch["name"] for ch in channels]
+
+        # Query for all deleted channels
+        result = client.query(
+            "SELECT channel_name FROM channel_config WHERE deleted = true"
+        )
+
+        deleted_names = set(row[0] for row in result.result_rows)
+        return [ch for ch in channels if ch["name"] not in deleted_names]
+    except Exception as exc:
+        logger.error("Error filtering soft-deleted channels: %s", exc)
+        return channels
+
+
 async def _fetch_all_channels(meshcore: Any) -> list[dict[str, Any]]:
     """
     Iterate all channel slots on the device and return initialised ones.
@@ -156,15 +184,19 @@ async def get_channels(
     (create / delete).  A device round-trip is only performed when the cache is
     cold or expired.
 
+    Soft-deleted channels (marked in ``channel_config`` table) are excluded
+    from the response.
+
     - **401** — invalid or missing ``x-api-token``.
     - **502** — device connection failed (cache cold and device unreachable).
     """
     cached = get_cached_channels()
     if cached is not None:
         logger.debug("GET /api/channels — cache hit (%d channels)", len(cached))
+        filtered = _filter_soft_deleted_channels(cached)
         return ChannelsResponse(
             status="ok",
-            channels=[ChannelInfo(**ch) for ch in cached],
+            channels=[ChannelInfo(**ch) for ch in filtered],
         )
 
     logger.info("GET /api/channels — cache miss, fetching from device")
@@ -180,9 +212,10 @@ async def get_channels(
             },
         ) from exc
 
+    filtered = _filter_soft_deleted_channels(channels)
     return ChannelsResponse(
         status="ok",
-        channels=[ChannelInfo(**ch) for ch in channels],
+        channels=[ChannelInfo(**ch) for ch in filtered],
     )
 
 
@@ -322,9 +355,10 @@ async def create_channel(
                             "Channel cache refreshed after restore (%d channels)",
                             len(channels),
                         )
+                        filtered = _filter_soft_deleted_channels(channels)
                         return ChannelsResponse(
                             status="ok",
-                            channels=[ChannelInfo(**ch) for ch in channels],
+                            channels=[ChannelInfo(**ch) for ch in filtered],
                         )
                 except Exception as exc:
                     logger.error("Error checking channel_config: %s", exc)
@@ -389,9 +423,10 @@ async def create_channel(
     set_cache(channels)
     logger.info("Channel cache refreshed after create (%d channels)", len(channels))
 
+    filtered = _filter_soft_deleted_channels(channels)
     return ChannelsResponse(
         status="ok",
-        channels=[ChannelInfo(**ch) for ch in channels],
+        channels=[ChannelInfo(**ch) for ch in filtered],
     )
 
 
@@ -447,9 +482,10 @@ async def delete_channel(
                 "Channel cache refreshed after soft delete (%d channels)",
                 len(channels),
             )
+            filtered = _filter_soft_deleted_channels(channels)
             return ChannelsResponse(
                 status="ok",
-                channels=[ChannelInfo(**ch) for ch in channels],
+                channels=[ChannelInfo(**ch) for ch in filtered],
             )
         except Exception as exc:
             logger.error("Failed to soft-delete channel: %s", exc)
@@ -557,7 +593,8 @@ async def delete_channel(
     set_cache(channels)
     logger.info("Channel cache refreshed after delete (%d channels)", len(channels))
 
+    filtered = _filter_soft_deleted_channels(channels)
     return ChannelsResponse(
         status="ok",
-        channels=[ChannelInfo(**ch) for ch in channels],
+        channels=[ChannelInfo(**ch) for ch in filtered],
     )
