@@ -1,0 +1,66 @@
+meta {
+  name: Delete Channel (Soft)
+  type: http
+  seq: 5
+}
+
+delete {
+  url: {{base_url}}/api/channels
+  body: json
+  auth: none
+}
+
+headers {
+  x-api-token: {{auth_token}}
+}
+
+body:json {
+  {
+    "name": "#test",
+    "soft": true
+  }
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+  
+  test("envelope status is ok", function() {
+    expect(res.body.status).to.equal("ok");
+  });
+  
+  test("channels is an array", function() {
+    expect(res.body.channels).to.be.an("array");
+  });
+  
+  test("soft-deleted channel is no longer present", function() {
+    const names = res.body.channels.map(function(ch) { return ch.name; });
+    expect(names).to.not.include("#public");
+  });
+  
+  test("each channel has required fields", function() {
+    res.body.channels.forEach(function(ch) {
+      expect(ch).to.have.property("index");
+      expect(ch).to.have.property("name");
+      expect(ch).to.have.property("secret_hex");
+    });
+  });
+}
+
+docs {
+  ## Delete Channel (Soft)
+  
+  Soft-deletes a channel by marking it in the `channel_config` table without
+  touching the device. The channel slot remains intact and can be restored
+  by re-creating a channel with the same name.
+  
+  Channel name matching is case-insensitive.
+  
+  ### Response
+  
+  - **200** — Channel soft-deleted successfully
+  - **400** — Empty channel name
+  - **401** — Missing / invalid token
+  - **500** — Database error during soft delete
+}
