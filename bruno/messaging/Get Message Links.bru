@@ -1,0 +1,48 @@
+meta {
+  name: Get Message Links
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{base_url}}/api/message-links?from=0&limit=100
+  body: none
+  auth: none
+}
+
+params:query {
+  from: 0
+  limit: 100
+}
+
+headers {
+  x-api-token: {{auth_token}}
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+
+  test("count is a non-negative integer", function() {
+    expect(res.body.count).to.be.a("number");
+    expect(res.body.count).to.be.at.least(0);
+  });
+
+  test("links is an array", function() {
+    expect(res.body.links).to.be.an("array");
+  });
+
+  test("count matches links array length", function() {
+    expect(res.body.count).to.equal(res.body.links.length);
+  });
+
+  test("each link has required fields", function() {
+    res.body.links.forEach(function(link) {
+      expect(link).to.have.property("received_at");
+      expect(link).to.have.property("username");
+      expect(link).to.have.property("channel_name");
+      expect(link).to.have.property("link");
+    });
+  });
+}
