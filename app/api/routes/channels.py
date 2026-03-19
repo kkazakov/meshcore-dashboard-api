@@ -114,9 +114,9 @@ def _filter_soft_deleted_channels(
         client = get_client()
         channel_names = [ch["name"] for ch in channels]
 
-        # Query for all deleted channels
+        # Query for all deleted channels (use FINAL for immediate consistency)
         result = client.query(
-            "SELECT channel_name FROM channel_config WHERE deleted = true"
+            "SELECT channel_name FROM channel_config FINAL WHERE deleted = true"
         )
 
         deleted_names = set(row[0] for row in result.result_rows)
