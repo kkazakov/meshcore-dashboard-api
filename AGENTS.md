@@ -1,6 +1,6 @@
 # AGENTS.md — Meshcore Dashboard
 
-Guidelines for agentic coding agents (and human contributors) working in this repo.
+Guidelines for agentic coding agents working in this repo.
 
 ---
 
@@ -17,234 +17,201 @@ Python FastAPI server that:
 
 ```
 app/
-  main.py              # FastAPI app factory & router registration
-  config.py            # Pydantic-settings config (reads .env)
+  main.py              # FastAPI app factory, lifespan, router registration, root logging
+  config.py            # Pydantic-settings Settings singleton (reads .env)
+  events.py            # WebSocket event bus (queue, broadcast, 1s debounce)
   api/
-    routes/            # One file per resource (status.py, contacts.py, …)
+    deps.py            # require_token dependency (60s in-memory token cache)
+    routes/            # One file per resource (status.py, auth.py, messages.py, …)
   db/
-    clickhouse.py      # ClickHouse client wrapper (clickhouse-connect)
-  meshcore/            # MeshCore connectivity helpers (copied from temp-meshcore/)
-    telemetry_common.py
-    telemetry.py
-    telemetry_json.py
-  events.py            # WebSocket event bus for real-time message broadcasting
-  api/
-    routes/            # One file per resource (status.py, contacts.py, …)
-tests/                 # pytest test files mirroring app/ structure
+    clickhouse.py      # get_client(), ping() — new client per call
+  meshcore/
+    connection.py      # Global asyncio.Lock (device_lock) — serialize all device access
+    channel_cache.py   # 12-hour in-process channel list cache
+    telemetry_common.py, telemetry.py, telemetry_json.py
+  workers/             # Background pollers (started in lifespan)
+    message_poller.py
+    repeater_telemetry_poller.py
+tests/                 # pytest files mirroring app/ structure
+docker-aio/clickhouse/initdb.d/00_init.sql  # Schema: users, tokens, messages, repeaters, repeater_telemetry
 requirements.txt
 .env / .env.example
 ```
 
 ---
 
-## Setup
+## Setup & Running
 
 ```bash
-python -m venv venv
-source venv/bin/activate
+# Setup
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # then edit .env with real values
-```
+cp .env.example .env  # edit with real values
 
----
-
-## Running the Server
-
-```bash
+# Run server
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Interactive API docs available at `http://localhost:8000/docs`.
+API docs at `http://localhost:8000/docs`.
 
 ---
 
 ## Build / Lint / Test Commands
 
-### Run all tests
 ```bash
+# Run all tests
 pytest
-```
 
-### Run a single test file
-```bash
+# Run a single test file
 pytest tests/test_status.py
-```
 
-### Run a single test by name
-```bash
+# Run a single test by name
 pytest tests/test_status.py::test_status_ok
-```
 
-### Run tests with verbose output
-```bash
+# Verbose output
 pytest -v
-```
 
-### Lint (ruff — preferred)
-```bash
+# Lint (ruff — preferred linter, replaces flake8 + isort)
 ruff check .
+
+# Check formatting without modifying
 ruff format --check .
-```
 
-### Format
-```bash
+# Auto-format
 ruff format .
-```
 
-### Type-check
-```bash
+# Type-check
 mypy app/
 ```
+
+No `pyproject.toml` or `ruff.toml`; ruff and pytest run with CLI defaults.
 
 ---
 
 ## Code Style
 
-### Language & version
-- Python 3.11+. Use modern syntax (`match`, `|` unions, `X | None` instead of `Optional[X]`).
+### Language & Version
+- Python 3.11+. Use modern syntax: `match`, `X | None` instead of `Optional[X]`, `tuple[bool, float]` instead of `Tuple`.
 
 ### Formatting
-- **ruff** is the formatter and linter (replaces black + flake8 + isort).
-- Line length: **88** characters.
+- **ruff** is the formatter and linter (no separate black/flake8 config).
+- Line length: **88** characters (ruff default).
 - Double quotes for strings.
 
 ### Imports
-- Standard library → third-party → local; each group separated by a blank line (ruff/isort enforces this).
-- Absolute imports only (`from app.db.clickhouse import ping`, never relative `from ..db`).
-- Never use wildcard imports (`from module import *`).
+- Order: standard library → third-party → local; each group separated by a blank line.
+- Absolute imports only: `from app.db.clickhouse import get_client` — never `from ..db`.
+- No wildcard imports (`from module import *`).
 
-### Naming conventions
+### Naming Conventions
 | Kind | Convention | Example |
 |---|---|---|
 | Modules / packages | `snake_case` | `telemetry_common.py` |
 | Classes | `PascalCase` | `StatusResponse` |
 | Functions / variables | `snake_case` | `get_client()` |
-| Constants | `UPPER_SNAKE_CASE` | `MAX_RETRIES = 3` |
+| Module-level constants | `_UPPER_SNAKE_CASE` | `_MAX_CHANNEL_SLOTS = 8` |
+| Public constants | `UPPER_SNAKE_CASE` | `MAX_RETRIES = 3` |
 | Pydantic models | `PascalCase` | `ClickhouseHealth` |
+| Unused parameters | prefix `_` | `_email: str` |
 
-### Type annotations
+### Type Annotations
 - All function signatures must be fully annotated (parameters + return type).
-- Use `pydantic.BaseModel` for all API request/response schemas.
-- Use `pydantic-settings BaseSettings` for configuration (never raw `os.getenv` in application code — only in `app/config.py`).
+- Use `pydantic.BaseModel` for all API request/response schemas; define models in the same file as their route.
+- Use `pydantic-settings BaseSettings` for configuration. Never call `os.getenv` outside `app/config.py`.
+- Note: `app/meshcore/telemetry_common.py` predates these rules and uses `os.getenv` + `load_dotenv` directly — do not copy that pattern.
 
-### Error handling
-- Never swallow exceptions silently. At minimum, log with `logger.error(...)`.
-- Use `try / except SpecificException` — avoid bare `except:`.
-- FastAPI route handlers should raise `fastapi.HTTPException` for client errors.
-- ClickHouse / IO failures should be caught in `app/db/` and return a typed result or raise a domain exception; routes translate these into HTTP responses.
+### Route File Structure
+```python
+"""Module docstring describing endpoints, auth requirements, request/response."""
+
+import logging
+# … other imports …
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# Pydantic schemas for this resource
+class MyRequest(BaseModel): ...
+class MyResponse(BaseModel): ...
+
+# Route handlers
+@router.get("/api/resource")
+def list_resource(_email: str = Depends(require_token)) -> list[MyResponse]:
+    ...
+```
+
+### Error Handling
+- Never swallow exceptions silently; at minimum log with `logger.error(...)`.
+- Use `except SpecificException` — avoid bare `except:`.
+- Route handlers raise `HTTPException` for client errors:
+  ```python
+  raise HTTPException(status_code=404, detail={"status": "error", "message": "not found"})
+  ```
+- ClickHouse / IO failures: catch in `app/db/`, return a typed result or raise a domain exception.
 
 ### Logging
-- Use the stdlib `logging` module. Obtain a logger per module:
-  ```python
-  import logging
-  logger = logging.getLogger(__name__)
-  ```
-- Root logger is configured once in `app/main.py`. Never call `logging.basicConfig` elsewhere.
-- Log levels: `DEBUG` for verbose diagnostics, `INFO` for normal operations, `WARNING` for recoverable issues, `ERROR` for failures.
+- Per-module logger: `logger = logging.getLogger(__name__)`
+- Root logger configured **only** in `app/main.py`. Never call `logging.basicConfig` elsewhere.
+- Levels: `DEBUG` verbose · `INFO` normal ops · `WARNING` recoverable · `ERROR` failures.
 
-### Async
-- FastAPI route functions are **synchronous by default** unless actual async I/O is performed.
-- Use `async def` only when calling `await`-able code (e.g., MeshCore BLE/TCP operations).
-- ClickHouse queries via `clickhouse-connect` are synchronous; wrap in `asyncio.to_thread` if called from an async context.
+### Async Rules
+- Route functions are **synchronous by default**; use `async def` only when actually `await`-ing.
+- All MeshCore calls are async; wrap in `async def` and use `async with device_lock:` from `app/meshcore/connection.py`.
+- Always disconnect in a `finally` block: `await asyncio.wait_for(meshcore.disconnect(), timeout=5)`.
+- ClickHouse is synchronous; call via `await asyncio.to_thread(...)` from async contexts.
 
 ### Configuration
-- All config lives in `app/config.py` as a `pydantic-settings` `Settings` class.
-- Access via the singleton: `from app.config import settings`.
-- Never hardcode hostnames, ports, credentials, or feature flags outside of `app/config.py`.
+- All config in `app/config.py` as a `pydantic-settings` `Settings` class.
+- Access via singleton: `from app.config import settings`.
+- Never hardcode hosts, ports, credentials, or feature flags outside `app/config.py`.
 
 ---
 
 ## Testing Guidelines
 
-- Tests live in `tests/`, mirroring the `app/` structure.
-- Use `fastapi.testclient.TestClient` for synchronous route tests.
-- Mock external dependencies (`ping`, MeshCore connections) with `unittest.mock.patch`.
-- Do **not** hit real ClickHouse or real radio devices in unit tests.
-- Integration tests (if added) should be in `tests/integration/` and skipped by default (`pytest -m "not integration"`).
-- Each test function name starts with `test_` and is descriptive: `test_status_degraded_when_clickhouse_unavailable`.
+- Tests live in `tests/`, one file per `app/` module (e.g. `tests/test_messages.py`).
+- Use `fastapi.testclient.TestClient` at module level for synchronous route tests.
+- Mock **all** external dependencies with `unittest.mock.patch` / `MagicMock` / `AsyncMock`.
+- Never hit real ClickHouse or real radio devices in unit tests.
+- Descriptive test names: `test_send_message_channel_not_found_returns_404`.
+- Use `@contextmanager` helper functions for reusable auth mocking (see `_valid_token()` pattern).
+- Always assert both status code **and** response body content on error paths.
+- Async tests use `@pytest.mark.asyncio` with `async def` inside a test class.
+- Use `pytest.fixture(autouse=True)` for per-test setup/teardown (e.g. resetting caches).
 
 ---
 
 ## MeshCore Connectivity
 
-- All device-connection logic lives in `app/meshcore/telemetry_common.py`.
-- Supported transports: **BLE**, **Serial**, **TCP** — set via `CONNECTION_TYPE` env var.
-- Always call `await meshcore.disconnect()` in a `finally` block after connecting.
-- Key functions: `connect_to_device`, `find_contact_by_name`, `get_status`, `status_to_dict`.
-- The `meshcore` library is async; all MeshCore calls must be in `async def` functions.
+- Device-connection helpers: `app/meshcore/telemetry_common.py`.
+- Supported transports: **BLE**, **Serial**, **TCP** — set via `connection_type` in settings.
+- Serialize all device access with `async with device_lock:` (`app/meshcore/connection.py`).
+- Always call `await asyncio.wait_for(meshcore.disconnect(), timeout=5)` in a `finally` block.
+- Key functions: `connect_to_device`, `find_contact_by_name`, `find_contact_by_public_key`, `get_status`, `status_to_dict`.
 
 ---
 
 ## ClickHouse
 
 - Client wrapper: `app/db/clickhouse.py`.
-- `get_client()` returns a cached `clickhouse_connect.Client` (HTTP port **8123** by default).
-- `ping()` returns `(ok: bool, latency_ms: float)` — used by `GET /status`.
-- All schema / table DDL goes in `sql/`.
-- Use native ClickHouse types; store timestamps as `DateTime64(3, 'UTC')`.
+- `get_client()` returns a **new** `clickhouse_connect.Client` per call (not thread-safe).
+- `ping()` returns `tuple[bool, float]` — used by `GET /status`.
+- Store timestamps as `DateTime64(3, 'UTC')`.
+- Schema source of truth: `docker-aio/clickhouse/initdb.d/00_init.sql`.
 
 ---
 
 ## WebSocket Real-Time Broadcasting
 
-### Overview
-The server broadcasts new messages to all connected authenticated WebSocket clients via `/ws` endpoint.
-
-### Connection
-```
-ws://localhost:8000/ws
-```
-
-### Authentication
-Send an authentication message immediately after connecting:
-```json
-{"type": "auth", "token": "<your-api-token>"}
-```
-
-On success, the server responds:
-```json
-{"type": "welcome", "email": "user@example.com"}
-```
-
-### Message Format
-New messages are broadcast as:
-```json
-{
-  "type": "new_message",
-  "data": {
-    "received_at": "2026-02-15T12:34:56.789Z",
-    "channel_name": "test",
-    "sender_name": "alice",
-    "text": "Hello world",
-    "msg_type": "CHAN",
-    "snr": 5.2,
-    "channel_idx": 0,
-    "sender_timestamp": 1740000000
-  }
-}
-```
-
-### Client Reconnection
-Clients should implement automatic reconnection on disconnect. A simple strategy:
-1. Wait 1-5 seconds after disconnect
-2. Reconnect and re-authenticate
-3. Resume listening for messages
-
-### Server-Side Behavior
-- Messages from the poller are queued with a 1-second debounce
-- Batches of up to 100 messages are broadcast together
-- Queue size is capped at 1000 messages (oldest dropped if full)
-- Heartbeats every 30 seconds to detect stale connections
+- Endpoint: `ws://localhost:8000/ws`
+- Authenticate: `{"type": "auth", "token": "<api-token>"}` → `{"type": "welcome", "email": "user@example.com"}`
+- Broadcasts: `{"type": "new_message", "data": {...}}`
+- Server debounces 1 second and batches up to 100 messages per broadcast.
 
 ---
 
 ## Adding a New Endpoint
 
-## Adding a New Endpoint
-
-1. Create `app/api/routes/<resource>.py` with an `APIRouter`.
-2. Define Pydantic response/request models in the same file (or a `app/models/` file if shared).
-3. Register the router in `app/main.py` with `app.include_router(...)`.
-4. Add tests in `tests/test_<resource>.py`.
-
----
+1. Create `app/api/routes/<resource>.py` with an `APIRouter` and Pydantic models.
+2. Register the router in `app/main.py` with `app.include_router(router, tags=["resource"])`.
+3. Add tests in `tests/test_<resource>.py` following the existing mock patterns.

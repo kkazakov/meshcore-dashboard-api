@@ -1,0 +1,67 @@
+# Dockerfile.api — builds meshcore-dashboard-api from source (git clone)
+#
+# The upstream Dockerfile bakes a .env file into the image, which is not
+# present in the repository (it is gitignored).  This wrapper clones the
+# repo, drops the COPY .env step, and relies entirely on environment
+# variables injected by Docker Compose at runtime.
+
+# ── Stage 1: clone ──────────────────────────────────────────────────────────
+FROM alpine/git:latest AS clone
+
+ARG API_REPO=https://github.com/kkazakov/meshcore-dashboard-api.git
+ARG API_BRANCH=master
+
+RUN git clone --depth 1 --branch ${API_BRANCH} ${API_REPO} /src
+
+# ── Stage 2: dependency builder ─────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        libdbus-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /venv
+ENV PATH="/venv/bin:$PATH"
+
+COPY --from=clone /src/requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
+
+# ── Stage 3: minimal runtime ─────────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/venv/bin:$PATH"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libdbus-1-3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /venv /venv
+COPY --from=clone /src/app/ ./app/
+COPY --from=clone /src/sql/ ./sql/
+
+# No COPY .env — all configuration is provided via environment variables
+# injected by Docker Compose (see docker-aio/docker-compose.yml).
+
+RUN adduser --disabled-password --gecos "" appuser \
+ && chown -R appuser /app
+USER appuser
+
+EXPOSE 8080
+
+CMD ["uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8080", \
+     "--workers", "1", \
+     "--no-access-log", \
+     "--no-use-colors"]

@@ -93,6 +93,7 @@ def transform_message(row: dict[str, Any]) -> dict[str, Any]:
         "snr": float(row.get("snr", 0.0)) if row.get("snr") is not None else 0.0,
         "channel_idx": row.get("channel_idx", -1),
         "sender_timestamp": row.get("sender_timestamp", 0),
+        "path_len": row.get("path_len", 0),
     }
 
 
