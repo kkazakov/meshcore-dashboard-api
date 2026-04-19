@@ -368,9 +368,7 @@ def disable_repeater(
 
 
 @router.get("/api/repeaters/companion", response_model=CompanionRepeatersResponse)
-async def companion_repeaters(
-    _email: str = Depends(require_token),
-) -> CompanionRepeatersResponse:
+async def companion_repeaters() -> CompanionRepeatersResponse:
     """
     List all repeaters (contacts) heard by the MeshCore companion device
     that have coordinates set.
@@ -379,7 +377,6 @@ async def companion_repeaters(
     only contacts with ``adv_lat`` / ``adv_lon`` present.
 
     - **200** — list of repeat ers with coordinates.
-    - **401** — invalid or missing ``x-api-token``.
     - **503** — could not reach the companion device.
     """
     meshcore = None
