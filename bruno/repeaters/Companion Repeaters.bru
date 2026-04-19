@@ -1,0 +1,42 @@
+meta {
+  name: Companion Repeaters
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{base_url}}/api/repeaters/companion
+  body: none
+  auth: none
+}
+
+tests {
+  test("status 200", function() {
+    expect(res.status).to.equal(200);
+  });
+
+  test("envelope status is ok", function() {
+    expect(res.body.status).to.equal("ok");
+  });
+
+  test("repeaters array present", function() {
+    expect(res.body.repeaters).to.be.an("array");
+  });
+
+  test("each repeater has required fields", function() {
+    res.body.repeaters.forEach(function(r) {
+      expect(r).to.have.property("name");
+      expect(r).to.have.property("public_key");
+      expect(r).to.have.property("last_heard");
+      expect(r).to.have.property("lat");
+      expect(r).to.have.property("lon");
+    });
+  });
+
+  test("coordinates are strings", function() {
+    res.body.repeaters.forEach(function(r) {
+      expect(typeof r.lat).to.equal("string");
+      expect(typeof r.lon).to.equal("string");
+    });
+  });
+}

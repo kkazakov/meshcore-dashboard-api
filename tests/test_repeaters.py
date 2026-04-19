@@ -4,9 +4,11 @@ Tests for PATCH /api/repeaters/{repeater_id} (update repeater).
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from fastapi.testclient import TestClient
+
+from meshcore import EventType
 
 from app.main import app
 
@@ -305,3 +307,239 @@ def test_update_repeater_preserves_enabled_and_password():
     # columns: id, name, public_key, password, enabled, created_at
     assert inserted_row[3] == "hunter2"  # password preserved
     assert inserted_row[4] is False  # enabled preserved
+
+
+# ---------------------------------------------------------------------------
+# GET /api/repeaters/companion
+# ---------------------------------------------------------------------------
+
+
+def _make_contact(name, public_key, lat, lon, last_advert=None):
+    contact = {
+        "adv_name": name,
+        "public_key": public_key,
+        "adv_lat": lat,
+        "adv_lon": lon,
+    }
+    if last_advert is not None:
+        contact["last_advert"] = last_advert
+    return contact
+
+
+def _mock_contacts_endpoint(contacts_with_coords, contacts_without_coords=None):
+    """Return a mock for the companion repeaters endpoint."""
+    all_contacts = dict(contacts_with_coords)
+    if contacts_without_coords:
+        all_contacts.update(contacts_without_coords)
+
+    mock_meshcore = MagicMock()
+    event = MagicMock()
+    event.type = EventType.OK
+    event.payload = all_contacts
+    mock_meshcore.commands.get_contacts.return_value = event
+    mock_meshcore.disconnect = AsyncMock()
+
+    def patch_fn(fn):
+        return fn(
+            "app.meshcore.telemetry_common.connect_to_device",
+            return_value=mock_meshcore,
+        ), MagicMock(return_value=mock_meshcore)
+
+    return patch_fn
+
+
+def test_companion_repeaters_returns_contacts_with_coordinates():
+    """Contacts with lat/lon must be returned in the response."""
+    contacts = {
+        "id1": _make_contact(
+            "Krasi T3",
+            "80dc9a35b5baf9a34e427c68197e76122145640c1b40780eab9948a3e5bc1a5b",
+            42.458971,
+            24.493923,
+        ),
+        "id2": _make_contact(
+            "Plovdiv Node",
+            "aa11bb22cc33dd44ee55ff66aa77bb88cc99dd00ee11ff22aa33bb44cc55dd66",
+            42.15,
+            24.75,
+        ),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get("/api/repeaters/companion")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert len(body["repeaters"]) == 2
+    names = {r["name"] for r in body["repeaters"]}
+    assert "Krasi T3" in names
+    assert "Plovdiv Node" in names
+
+
+def test_companion_repeaters_filters_out_contacts_without_coordinates():
+    """Contacts without lat/lon must be excluded from the response."""
+    contacts = {
+        "id1": _make_contact("With Coords", "aa11bb22cc33", 42.0, 24.0),
+        "id2": _make_contact("No Lat", "dd44ee55ff66", None, 24.0),
+        "id3": _make_contact("No Lon", "gg77hh88ii99", 42.0, None),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get("/api/repeaters/companion")
+
+    assert response.status_code == 200
+    assert len(response.json()["repeaters"]) == 1
+    assert response.json()["repeaters"][0]["name"] == "With Coords"
+
+
+def test_companion_repeaters_device_failure_returns_503():
+    """If the companion device is unreachable, must return 503."""
+    with (
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(side_effect=Exception("connection refused")),
+        ),
+    ):
+        response = client.get("/api/repeaters/companion")
+
+    assert response.status_code == 503
+    assert "companion device" in response.json()["detail"]["message"]
+
+
+def test_companion_repeaters_empty_result():
+    """When no contacts have coordinates, must return empty list."""
+    contacts = {
+        "id1": _make_contact("No Coords", "aa11", None, None),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get("/api/repeaters/companion")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["repeaters"] == []
+
+
+def test_companion_repeaters_formats_coordinates():
+    """Coordinates must be formatted as 6-decimal strings."""
+    contacts = {
+        "id1": _make_contact("Precise", "aa11bb22cc33", 42.458971234, 24.493923567),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get("/api/repeaters/companion")
+
+    assert response.status_code == 200
+    r = response.json()["repeaters"][0]
+    assert r["lat"] == "42.458971"
+    assert r["lon"] == "24.493924"
+
+
+def test_companion_repeaters_filters_zero_coordinates():
+    """Contacts with lat=0 and lon=0 must be excluded."""
+    contacts = {
+        "id1": _make_contact("Zero Coords", "aa11", 0.0, 0.0),
+        "id2": _make_contact("Valid", "bb22", 42.0, 24.0),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get("/api/repeaters/companion")
+
+    assert response.status_code == 200
+    assert len(response.json()["repeaters"]) == 1
+    assert response.json()["repeaters"][0]["name"] == "Valid"
+
+
+def test_companion_repeaters_last_heard_from_last_advert():
+    """last_heard must be derived from the contact's last_advert Unix timestamp."""
+    import time
+
+    ts = int(time.time())
+    contacts = {
+        "id1": _make_contact("Heard", "cc33", 42.0, 24.0, last_advert=ts),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get("/api/repeaters/companion")
+
+    assert response.status_code == 200
+    r = response.json()["repeaters"][0]
+    assert r["last_heard"] != ""
+    assert "T" in r["last_heard"]
+
+
+def test_companion_repeaters_last_heard_empty_when_no_advert():
+    """last_heard must be empty when last_advert is not present."""
+    contacts = {
+        "id1": _make_contact("No Advert", "dd44", 42.0, 24.0),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get("/api/repeaters/companion")
+
+    assert response.status_code == 200
+    assert response.json()["repeaters"][0]["last_heard"] == ""

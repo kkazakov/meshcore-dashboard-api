@@ -463,3 +463,79 @@ def get_messages(
         count=len(records),
         messages=records,
     )
+
+
+# ── GET /api/message-links ───────────────────────────────────────────────────
+
+
+class MessageLinkRecord(BaseModel):
+    received_at: datetime
+    username: str
+    channel_name: str
+    link: str
+
+
+class GetMessageLinksResponse(BaseModel):
+    count: int
+    links: list[MessageLinkRecord]
+
+
+@router.get("/api/message-links", response_model=GetMessageLinksResponse)
+def get_message_links(
+    from_offset: int = Query(
+        default=0,
+        alias="from",
+        ge=0,
+        description="Row offset for pagination",
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=1000,
+        description="Maximum number of links to return",
+    ),
+    _email: str = Depends(require_token),
+) -> GetMessageLinksResponse:
+    """
+    Fetch extracted HTTPS links from messages.
+
+    Returns links ordered by ``received_at`` descending (newest first),
+    with pagination via ``from`` and ``limit`` query parameters.
+
+    - **200** — list of matching links.
+    - **401** — invalid or missing ``x-api-token``.
+    - **503** — ClickHouse unavailable.
+    """
+    sql = (
+        "SELECT received_at, username, channel_name, link "
+        "FROM message_links "
+        "ORDER BY received_at DESC "
+        "LIMIT {limit:UInt32} OFFSET {offset:UInt32}"
+    )
+    params = {"limit": limit, "offset": from_offset}
+
+    try:
+        client = get_client()
+        result = client.query(sql, parameters=params)
+    except Exception as exc:
+        logger.error("ClickHouse query failed in get_message_links: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "error", "message": "Database unavailable"},
+        ) from exc
+
+    records: list[MessageLinkRecord] = []
+    for received_at, username, channel_name, link in result.result_rows:
+        records.append(
+            MessageLinkRecord(
+                received_at=received_at,
+                username=username,
+                channel_name=channel_name,
+                link=link,
+            )
+        )
+
+    return GetMessageLinksResponse(
+        count=len(records),
+        links=records,
+    )

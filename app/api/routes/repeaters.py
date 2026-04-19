@@ -15,9 +15,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from meshcore import EventType
+
 from app.api.deps import require_token
 from app.db.clickhouse import get_client
 from app.meshcore import telemetry_common
+from app.meshcore.connection import device_lock
 from app.workers.repeater_telemetry_poller import _poll_all_repeaters
 
 logger = logging.getLogger(__name__)
@@ -59,6 +62,19 @@ class RepeaterSingleResponse(BaseModel):
 class PollResponse(BaseModel):
     status: str
     message: str
+
+
+class CompanionRepeaterItem(BaseModel):
+    name: str
+    public_key: str
+    last_heard: str
+    lat: str
+    lon: str
+
+
+class CompanionRepeatersResponse(BaseModel):
+    status: str
+    repeaters: list[CompanionRepeaterItem]
 
 
 @router.get("/api/repeaters", response_model=RepeaterListResponse)
@@ -349,3 +365,85 @@ def disable_repeater(
     logger.info("Disabled repeater %s", repeater_id)
 
     return {"status": "ok", "message": "Repeater disabled"}
+
+
+@router.get("/api/repeaters/companion", response_model=CompanionRepeatersResponse)
+async def companion_repeaters() -> CompanionRepeatersResponse:
+    """
+    List all repeaters (contacts) heard by the MeshCore companion device
+    that have coordinates set.
+
+    Connects to the companion device, reads its contact list, and returns
+    only contacts with ``adv_lat`` / ``adv_lon`` present.
+
+    - **200** — list of repeat ers with coordinates.
+    - **503** — could not reach the companion device.
+    """
+    meshcore = None
+    try:
+        async with device_lock:
+            meshcore = await telemetry_common.connect_to_device(
+                telemetry_common.load_config(), verbose=False
+            )
+
+            result = await meshcore.commands.get_contacts()
+
+            if result is None or result.type == EventType.ERROR:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "status": "error",
+                        "message": "Failed to get contacts from companion device",
+                    },
+                )
+
+            contacts = result.payload or {}
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Companion repeaters connection failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "error",
+                "message": "Could not reach the companion device",
+            },
+        )
+    finally:
+        if meshcore:
+            try:
+                await asyncio.wait_for(meshcore.disconnect(), timeout=5)
+            except Exception:
+                pass
+
+    repeaters = []
+    for contact_id, contact in contacts.items():
+        lat = contact.get("adv_lat")
+        lon = contact.get("adv_lon")
+        if lat is None or lon is None:
+            continue
+        if lat == 0 and lon == 0:
+            continue
+
+        public_key = contact.get("public_key", "")
+        last_advert = contact.get("last_advert")
+
+        last_heard_str = ""
+        if isinstance(last_advert, (int, float)) and last_advert > 0:
+            last_heard_str = datetime.fromtimestamp(
+                last_advert, tz=timezone.utc
+            ).isoformat()
+
+        repeaters.append(
+            CompanionRepeaterItem(
+                name=contact.get("adv_name", ""),
+                public_key=public_key,
+                last_heard=last_heard_str,
+                lat=f"{lat:.6f}" if isinstance(lat, (int, float)) else str(lat),
+                lon=f"{lon:.6f}" if isinstance(lon, (int, float)) else str(lon),
+            )
+        )
+
+    logger.info("Companion repeaters: %d with coordinates", len(repeaters))
+    return CompanionRepeatersResponse(status="ok", repeaters=repeaters)
