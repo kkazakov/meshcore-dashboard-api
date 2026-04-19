@@ -4,9 +4,11 @@ Tests for PATCH /api/repeaters/{repeater_id} (update repeater).
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from fastapi.testclient import TestClient
+
+from meshcore import EventType
 
 from app.main import app
 
@@ -305,3 +307,207 @@ def test_update_repeater_preserves_enabled_and_password():
     # columns: id, name, public_key, password, enabled, created_at
     assert inserted_row[3] == "hunter2"  # password preserved
     assert inserted_row[4] is False  # enabled preserved
+
+
+# ---------------------------------------------------------------------------
+# GET /api/repeaters/companion
+# ---------------------------------------------------------------------------
+
+
+def _make_contact(name, public_key, lat, lon, last_seen=None):
+    return {
+        "adv_name": name,
+        "public_key": public_key,
+        "adv_lat": lat,
+        "adv_lon": lon,
+        "last_seen": last_seen or "2026-02-24T11:04:32.146000",
+    }
+
+
+def _mock_contacts_endpoint(contacts_with_coords, contacts_without_coords=None):
+    """Return a mock for the companion repeaters endpoint."""
+    all_contacts = dict(contacts_with_coords)
+    if contacts_without_coords:
+        all_contacts.update(contacts_without_coords)
+
+    mock_meshcore = MagicMock()
+    event = MagicMock()
+    event.type = EventType.OK
+    event.payload = all_contacts
+    mock_meshcore.commands.get_contacts.return_value = event
+    mock_meshcore.disconnect = AsyncMock()
+
+    def patch_fn(fn):
+        return fn(
+            "app.meshcore.telemetry_common.connect_to_device",
+            return_value=mock_meshcore,
+        ), MagicMock(return_value=mock_meshcore)
+
+    return patch_fn
+
+
+def test_companion_repeaters_missing_token_returns_401():
+    """GET /api/repeaters/companion without token must return 401."""
+    response = client.get("/api/repeaters/companion")
+    assert response.status_code == 401
+
+
+def test_companion_repeaters_invalid_token_returns_401():
+    """GET /api/repeaters/companion with invalid token must return 401."""
+    bad_auth = MagicMock()
+    bad_auth.query.return_value = MagicMock(result_rows=[])
+    with patch("app.api.deps.get_client", return_value=bad_auth):
+        response = client.get(
+            "/api/repeaters/companion",
+            headers={"x-api-token": "bad-token"},
+        )
+    assert response.status_code == 401
+
+
+def test_companion_repeaters_returns_contacts_with_coordinates():
+    """Contacts with lat/lon must be returned in the response."""
+    auth = _auth_client()
+    contacts = {
+        "id1": _make_contact(
+            "Krasi T3",
+            "80dc9a35b5baf9a34e427c68197e76122145640c1b40780eab9948a3e5bc1a5b",
+            42.458971,
+            24.493923,
+        ),
+        "id2": _make_contact(
+            "Plovdiv Node",
+            "aa11bb22cc33dd44ee55ff66aa77bb88cc99dd00ee11ff22aa33bb44cc55dd66",
+            42.15,
+            24.75,
+        ),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch("app.api.deps.get_client", return_value=auth),
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get(
+            "/api/repeaters/companion",
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert len(body["repeaters"]) == 2
+    names = {r["name"] for r in body["repeaters"]}
+    assert "Krasi T3" in names
+    assert "Plovdiv Node" in names
+
+
+def test_companion_repeaters_filters_out_contacts_without_coordinates():
+    """Contacts without lat/lon must be excluded from the response."""
+    auth = _auth_client()
+    contacts = {
+        "id1": _make_contact("With Coords", "aa11bb22cc33", 42.0, 24.0),
+        "id2": _make_contact("No Lat", "dd44ee55ff66", None, 24.0),
+        "id3": _make_contact("No Lon", "gg77hh88ii99", 42.0, None),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch("app.api.deps.get_client", return_value=auth),
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get(
+            "/api/repeaters/companion",
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+
+    assert response.status_code == 200
+    assert len(response.json()["repeaters"]) == 1
+    assert response.json()["repeaters"][0]["name"] == "With Coords"
+
+
+def test_companion_repeaters_device_failure_returns_503():
+    """If the companion device is unreachable, must return 503."""
+    auth = _auth_client()
+    with (
+        patch("app.api.deps.get_client", return_value=auth),
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(side_effect=Exception("connection refused")),
+        ),
+    ):
+        response = client.get(
+            "/api/repeaters/companion",
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+
+    assert response.status_code == 503
+    assert "companion device" in response.json()["detail"]["message"]
+
+
+def test_companion_repeaters_empty_result():
+    """When no contacts have coordinates, must return empty list."""
+    auth = _auth_client()
+    contacts = {
+        "id1": _make_contact("No Coords", "aa11", None, None),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch("app.api.deps.get_client", return_value=auth),
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get(
+            "/api/repeaters/companion",
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["repeaters"] == []
+
+
+def test_companion_repeaters_formats_coordinates():
+    """Coordinates must be formatted as 6-decimal strings."""
+    auth = _auth_client()
+    contacts = {
+        "id1": _make_contact("Precise", "aa11bb22cc33", 42.458971234, 24.493923567),
+    }
+    mock_meshcore = MagicMock()
+    mock_meshcore.commands.get_contacts = AsyncMock(
+        return_value=MagicMock(type=EventType.OK, payload=contacts)
+    )
+    mock_meshcore.disconnect = AsyncMock()
+    with (
+        patch("app.api.deps.get_client", return_value=auth),
+        patch(
+            "app.meshcore.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=mock_meshcore),
+        ),
+    ):
+        response = client.get(
+            "/api/repeaters/companion",
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+
+    assert response.status_code == 200
+    r = response.json()["repeaters"][0]
+    assert r["lat"] == "42.458971"
+    assert r["lon"] == "24.493924"
