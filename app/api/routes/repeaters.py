@@ -423,15 +423,23 @@ async def companion_repeaters() -> CompanionRepeatersResponse:
         lon = contact.get("adv_lon")
         if lat is None or lon is None:
             continue
+        if lat == 0 and lon == 0:
+            continue
 
         public_key = contact.get("public_key", "")
-        last_seen = contact.get("last_seen")
+        last_advert = contact.get("last_advert")
+
+        last_heard_str = ""
+        if isinstance(last_advert, (int, float)) and last_advert > 0:
+            last_heard_str = datetime.fromtimestamp(
+                last_advert, tz=timezone.utc
+            ).isoformat()
 
         repeaters.append(
             CompanionRepeaterItem(
                 name=contact.get("adv_name", ""),
                 public_key=public_key,
-                last_heard=last_seen or "",
+                last_heard=last_heard_str,
                 lat=f"{lat:.6f}" if isinstance(lat, (int, float)) else str(lat),
                 lon=f"{lon:.6f}" if isinstance(lon, (int, float)) else str(lon),
             )
