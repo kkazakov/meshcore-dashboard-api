@@ -384,6 +384,7 @@ The API will start even without a physical radio device attached; it logs a conn
 | `SERIAL_PORT` | `/dev/ttyUSB0` | Serial device path |
 | `SERIAL_BAUDRATE` | `115200` | Serial baud rate |
 | `DEBUG` | `true` | Enable verbose MeshCore debug logging |
+| `PATH_HASH_MODE` | `1` | Routing path hash size: `0` = 1-byte, `1` = 2-byte (firmware protocol ≥ v10) |
 | `REPEATER_POLL_INTERVAL` | `600` | Repeater telemetry polling interval (seconds) |
 
 #### Front-end
@@ -448,6 +449,7 @@ All settings are read from `.env` (see `.env.example` for the full template).
 | `TCP_HOST` | `192.168.1.100` | TCP host of the companion device |
 | `TCP_PORT` | `4000` | TCP port of the companion device |
 | `DEBUG` | `false` | Enable verbose MeshCore debug logging |
+| `PATH_HASH_MODE` | `1` | Routing path hash size: `0` = 1-byte, `1` = 2-byte (firmware protocol ≥ v10) |
 
 ### ClickHouse
 

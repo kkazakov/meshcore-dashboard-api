@@ -21,9 +21,25 @@ def load_config():
         "tcp_host": os.getenv("TCP_HOST", "192.168.1.100"),
         "tcp_port": int(os.getenv("TCP_PORT", "4000")),
         "debug": os.getenv("DEBUG", "false").lower() == "true",
+        # Path hash mode: 0 = 1-byte hashes, 1 = 2-byte hashes.
+        # Requires companion firmware protocol >= v10.
+        "path_hash_mode": _parse_path_hash_mode(os.getenv("PATH_HASH_MODE", "1")),
     }
 
     return config
+
+
+def _parse_path_hash_mode(raw: str) -> int:
+    """Parse PATH_HASH_MODE env value; fall back to 1 (2-byte) if invalid."""
+    try:
+        mode = int(raw)
+    except ValueError:
+        logger.warning("Invalid PATH_HASH_MODE %r, defaulting to 1", raw)
+        return 1
+    if mode not in (0, 1):
+        logger.warning("Unsupported PATH_HASH_MODE %d, defaulting to 1", mode)
+        return 1
+    return mode
 
 
 async def connect_to_device(config, verbose=True):
@@ -78,6 +94,8 @@ async def connect_to_device(config, verbose=True):
                 print("Valid types are: ble, serial, tcp")
             raise ValueError(f"Unknown connection type: {conn_type}")
 
+        await _apply_path_hash_mode(meshcore, config.get("path_hash_mode", 1), verbose)
+
         if verbose:
             print("✓ Connected successfully!\n")
         return meshcore
@@ -86,6 +104,39 @@ async def connect_to_device(config, verbose=True):
         if verbose:
             print(f"ERROR: Failed to connect to device: {e}")
         raise
+
+
+async def _apply_path_hash_mode(meshcore, mode: int, verbose: bool = True) -> None:
+    """
+    Put the companion device into the requested path hash mode
+    (0 = 1-byte hashes, 1 = 2-byte hashes).
+
+    Applied on every connect: connections are short-lived and the firmware
+    setting may not persist across reboots.  Never fails the connection —
+    older firmware (< protocol v10) rejects the command and simply stays
+    at its default 1-byte mode.
+    """
+    size = mode + 1
+    try:
+        result = await meshcore.commands.set_path_hash_mode(mode)
+        if result is None or result.type == EventType.ERROR:
+            payload = result.payload if result else "no response"
+            logger.warning(
+                "set_path_hash_mode(%d) rejected by device: %s", mode, payload
+            )
+            if verbose:
+                print(
+                    f"WARNING: Could not set {size}-byte path hash mode: "
+                    f"{payload} (firmware < v10?)"
+                )
+        else:
+            logger.debug("Path hash mode set to %d (%d-byte)", mode, size)
+            if verbose:
+                print(f"✓ Path hash mode set to {size}-byte")
+    except Exception as exc:
+        logger.warning("Failed to set path hash mode to %d: %s", mode, exc)
+        if verbose:
+            print(f"WARNING: Failed to set {size}-byte path hash mode: {exc}")
 
 
 async def login_to_contact(meshcore, contact, password, verbose=True):

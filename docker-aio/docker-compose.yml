@@ -66,6 +66,7 @@ services:
       SERIAL_PORT: ${SERIAL_PORT:-/dev/ttyUSB0}
       SERIAL_BAUDRATE: ${SERIAL_BAUDRATE:-115200}
       DEBUG: ${DEBUG:-true}
+      PATH_HASH_MODE: ${PATH_HASH_MODE:-1}
       # ClickHouse — service name as hostname inside the Docker network
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: 8123
