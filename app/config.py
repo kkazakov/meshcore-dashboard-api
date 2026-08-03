@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     tcp_host: str = "192.168.1.100"
     tcp_port: int = 4000
     debug: bool = False
+    # Path hash mode: 0 = 1-byte hashes, 1 = 2-byte hashes (fw protocol >= v10)
+    path_hash_mode: int = 1
 
     # ClickHouse
     clickhouse_host: str = "localhost"
