@@ -26,11 +26,25 @@ def _mock_token_client() -> MagicMock:
     return mock_ch
 
 
+def _mock_region_client(rows: list | None = None) -> MagicMock:
+    """ClickHouse client used for channel_config region lookups."""
+    mock_result = MagicMock()
+    mock_result.result_rows = rows if rows is not None else []
+    mock_ch = MagicMock()
+    mock_ch.query.return_value = mock_result
+    return mock_ch
+
+
 @contextmanager
-def _valid_token():
+def _valid_token(region_rows: list | None = None):
     """Context manager that provides a valid token for authenticated requests."""
-    mock_client = _mock_token_client()
-    with patch("app.api.deps.get_client", return_value=mock_client):
+    with (
+        patch("app.api.deps.get_client", return_value=_mock_token_client()),
+        patch(
+            "app.api.routes.messages.get_client",
+            return_value=_mock_region_client(region_rows),
+        ),
+    ):
         yield _VALID_TOKEN
 
 
@@ -71,6 +85,7 @@ def _build_meshcore_mock(channels: list[tuple[int, str]]) -> MagicMock:
 
     meshcore.commands.get_channel = AsyncMock(side_effect=channel_events)
     meshcore.commands.send_chan_msg = AsyncMock(return_value=_make_ok_event())
+    meshcore.commands.set_flood_scope = AsyncMock(return_value=_make_ok_event())
     meshcore.disconnect = AsyncMock()
     return meshcore
 
@@ -231,6 +246,98 @@ def test_send_message_channel_name_case_insensitive():
 
     assert response.status_code == 200
     assert response.json()["channel_index"] == 2
+
+
+# ── Region / scope ────────────────────────────────────────────────────────────
+
+
+def test_send_message_applies_stored_region():
+    """A channel's stored region is applied via set_flood_scope before sending."""
+    meshcore_mock = _build_meshcore_mock([(0, "test")])
+
+    with (
+        _valid_token(region_rows=[["us"]]) as token,
+        patch(
+            "app.api.routes.messages.telemetry_common.load_config",
+            return_value={},
+        ),
+        patch(
+            "app.api.routes.messages.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=meshcore_mock),
+        ),
+    ):
+        response = client.post(
+            "/api/messages",
+            json={"channel": "test", "message": "hello"},
+            headers={"x-api-token": token},
+        )
+
+    assert response.status_code == 200
+    meshcore_mock.commands.set_flood_scope.assert_awaited_once_with("us")
+    meshcore_mock.commands.send_chan_msg.assert_awaited_once_with(0, "hello")
+
+
+def test_send_message_explicit_region_overrides_stored():
+    """An explicit request region takes precedence over the stored one."""
+    meshcore_mock = _build_meshcore_mock([(0, "test")])
+
+    with (
+        _valid_token(region_rows=[["us"]]) as token,
+        patch(
+            "app.api.routes.messages.telemetry_common.load_config",
+            return_value={},
+        ),
+        patch(
+            "app.api.routes.messages.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=meshcore_mock),
+        ),
+    ):
+        response = client.post(
+            "/api/messages",
+            json={"channel": "test", "message": "hello", "region": "us-co"},
+            headers={"x-api-token": token},
+        )
+
+    assert response.status_code == 200
+    meshcore_mock.commands.set_flood_scope.assert_awaited_once_with("us-co")
+
+
+def test_send_message_without_region_resets_scope():
+    """No stored region -> the scope is reset so the message is unscoped."""
+    meshcore_mock = _build_meshcore_mock([(0, "test")])
+
+    with (
+        _valid_token() as token,
+        patch(
+            "app.api.routes.messages.telemetry_common.load_config",
+            return_value={},
+        ),
+        patch(
+            "app.api.routes.messages.telemetry_common.connect_to_device",
+            new=AsyncMock(return_value=meshcore_mock),
+        ),
+    ):
+        response = client.post(
+            "/api/messages",
+            json={"channel": "test", "message": "hello"},
+            headers={"x-api-token": token},
+        )
+
+    assert response.status_code == 200
+    meshcore_mock.commands.set_flood_scope.assert_awaited_once_with("")
+
+
+def test_send_message_invalid_region_returns_400():
+    """An invalid region override is rejected with 400."""
+    with _valid_token():
+        response = client.post(
+            "/api/messages",
+            json={"channel": "test", "message": "hello", "region": "BAD"},
+            headers={"x-api-token": _VALID_TOKEN},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["status"] == "error"
 
 
 # ── Error paths ───────────────────────────────────────────────────────────────

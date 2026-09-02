@@ -245,7 +245,7 @@ async def _set_flood_scope(meshcore: Any, channel_name: str, region: str) -> Non
         logger.error(
             "set_flood_scope failed for channel '%s' region '%s': %s",
             channel_name,
-            region,
+            region or "*",
             exc,
         )
         return
@@ -254,7 +254,7 @@ async def _set_flood_scope(meshcore: Any, channel_name: str, region: str) -> Non
         logger.error(
             "Device rejected flood scope for channel '%s' region '%s': %s",
             channel_name,
-            region,
+            region or "*",
             err_msg,
         )
 

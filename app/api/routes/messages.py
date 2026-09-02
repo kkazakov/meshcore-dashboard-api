@@ -14,6 +14,10 @@ Request body
 ``channel`` : channel name, optionally prefixed with ``#`` (e.g. ``#test``
               or ``test``).  Matching is case-insensitive.
 ``message``  : UTF-8 text to send.
+``region``   : (optional) MeshCore region/scope to apply for this message.
+              If omitted, the region stored for the channel (set at creation)
+              is applied; if the channel has no region, the scope is reset so
+              the message is sent unscoped.
 
 Responses
 ---------
@@ -58,6 +62,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.api.deps import require_token
+from app.api.routes.channels import _normalize_region, _set_flood_scope
 from app.db.clickhouse import get_client
 from app.events import queue_message
 from app.meshcore import telemetry_common
@@ -78,6 +83,7 @@ _MAX_CHANNEL_SLOTS = 8
 class SendMessageRequest(BaseModel):
     channel: str
     message: str
+    region: str | None = None
 
 
 class SendMessageResponse(BaseModel):
@@ -155,6 +161,22 @@ def _insert_sent_message(row: dict[str, Any]) -> None:
     logger.debug("Inserted sent message into ClickHouse")
 
 
+def _stored_region(channel_name: str) -> str | None:
+    """Return the region stored for a channel, or ``None`` when unset."""
+    try:
+        client = get_client()
+        result = client.query(
+            "SELECT region FROM channel_config FINAL "
+            "WHERE channel_name = {name:String} AND region != ''",
+            parameters={"name": channel_name},
+        )
+        if result.result_rows:
+            return result.result_rows[0][0]
+    except Exception as exc:
+        logger.error("Failed to load region for channel '%s': %s", channel_name, exc)
+    return None
+
+
 async def _resolve_channel_index(meshcore, channel_name: str) -> tuple[int, str]:
     """
     Scan device slots 0 – 7 and return ``(index, canonical_name)`` for the
@@ -214,7 +236,12 @@ async def send_message(
     (e.g. ``"#test"`` and ``"test"`` are equivalent).  Matching against the
     channels configured on the device is case-insensitive.
 
-    - **400** — ``channel`` or ``message`` is empty.
+    The optional ``region`` field scopes the message to a MeshCore region via
+    ``set_flood_scope`` before sending.  When omitted, the region stored for
+    the channel (set at creation) is used; a channel without a region sends
+    the message unscoped.
+
+    - **400** — ``channel`` or ``message`` is empty, or ``region`` is invalid.
     - **401** — invalid or missing ``x-api-token``.
     - **404** — channel not found on the device.
     - **502** — device connection failed or the send command was rejected.
@@ -233,6 +260,8 @@ async def send_message(
             status_code=400,
             detail={"status": "error", "message": "message must not be empty"},
         )
+
+    explicit_region = _normalize_region(payload.region)
 
     config = telemetry_common.load_config()
     meshcore = None
@@ -255,6 +284,16 @@ async def send_message(
 
             chan_idx, chan_name = await _resolve_channel_index(meshcore, channel_name)
             device_name = await _get_device_name(meshcore)
+
+            # MeshCore applies regions via a device-wide "current scope" at send
+            # time.  An explicit request region wins; otherwise fall back to the
+            # region stored for the channel at creation.  No region resets the
+            # scope so the message is sent unscoped (null region).
+            effective_region = explicit_region
+            if effective_region is None:
+                effective_region = _stored_region(chan_name)
+
+            await _set_flood_scope(meshcore, chan_name, effective_region or "")
 
             logger.info(
                 "Sending message to channel '%s' (slot %d): %r",
