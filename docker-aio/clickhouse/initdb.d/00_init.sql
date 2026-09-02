@@ -92,12 +92,13 @@ ENGINE = ReplacingMergeTree(created_at)
 ORDER BY token
 TTL expires_at DELETE;
 
--- 006_channel_config: channel configuration (soft-delete, mute tracking)
+-- 006_channel_config: channel configuration (soft-delete, mute tracking, region/scope)
 CREATE TABLE IF NOT EXISTS channel_config
 (
     channel_name String,
     muted_until  Nullable(DateTime64(3, 'UTC')),
     deleted      Bool DEFAULT false,
+    region       String DEFAULT '',
     updated_at   DateTime64(3, 'UTC') DEFAULT now64()
 )
 ENGINE = ReplacingMergeTree(updated_at)

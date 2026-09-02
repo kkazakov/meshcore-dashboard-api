@@ -38,9 +38,37 @@ def _mock_ch_client() -> MagicMock:
     return mock_ch
 
 
+def _mock_region_client(rows: list | None = None) -> MagicMock:
+    """ClickHouse client used for channel_config region lookups.
+
+    Routes by SQL so the soft-delete filter query (no region column) returns
+    no rows while the region lookup returns ``rows``.
+    """
+    rows = rows if rows is not None else []
+
+    def _query(sql: str, **kwargs) -> MagicMock:
+        result = MagicMock()
+        result.result_rows = rows if "region" in sql else []
+        return result
+
+    mock_ch = MagicMock()
+    mock_ch.query.side_effect = _query
+    return mock_ch
+
+
 @contextmanager
-def _valid_token():
-    with patch("app.api.deps.get_client", return_value=_mock_ch_client()):
+def _valid_token(region_rows: list | None = None):
+    with (
+        patch("app.api.deps.get_client", return_value=_mock_ch_client()),
+        patch(
+            "app.meshcore.channel_cache.get_client",
+            return_value=_mock_region_client(region_rows),
+        ),
+        patch(
+            "app.api.routes.channels.get_client",
+            return_value=_mock_region_client(region_rows),
+        ),
+    ):
         yield _VALID_TOKEN
 
 
@@ -169,6 +197,10 @@ class TestPopulateCache:
                 "app.meshcore.channel_cache.telemetry_common.load_config",
                 return_value={},
             ),
+            patch(
+                "app.meshcore.channel_cache.get_client",
+                return_value=_mock_region_client(),
+            ),
         ):
             channels = await populate_cache()
 
@@ -197,6 +229,10 @@ class TestPopulateCache:
             patch(
                 "app.meshcore.channel_cache.telemetry_common.load_config",
                 return_value={},
+            ),
+            patch(
+                "app.meshcore.channel_cache.get_client",
+                return_value=_mock_region_client(),
             ),
         ):
             channels = await populate_cache()
@@ -351,6 +387,167 @@ class TestCreateChannelCacheInvalidation:
         cached = get_cached_channels()
         assert cached is not None
         assert any(ch["name"] == "new-channel" for ch in cached)
+
+
+# ── Integration tests for POST /api/channels region/scope ────────────────────
+
+
+class TestCreateChannelRegion:
+    def _device_mocks(self) -> AsyncMock:
+        mock_meshcore = AsyncMock()
+        mock_meshcore.commands.get_channel = AsyncMock(
+            side_effect=[
+                # Slot scan: slot 0 occupied, slot 1 free, stops at ERROR
+                _make_channel_event(0, "general"),
+                _make_empty_slot_event(1),
+                _make_error_event(),
+                # _fetch_all_channels after write
+                _make_channel_event(0, "general"),
+                _make_channel_event(1, "new-channel"),
+                _make_error_event(),
+            ]
+        )
+        mock_meshcore.commands.set_channel = AsyncMock(return_value=_make_ok_event())
+        mock_meshcore.commands.set_flood_scope = AsyncMock(
+            return_value=_make_ok_event()
+        )
+        mock_meshcore.disconnect = AsyncMock()
+        return mock_meshcore
+
+    def test_create_with_region_provides_scope_and_persists(self):
+        """Region is passed to the companion via set_flood_scope and returned."""
+        mock_meshcore = self._device_mocks()
+
+        with (
+            _valid_token(region_rows=[["new-channel", "us"]]) as token,
+            patch(
+                "app.api.routes.channels.telemetry_common.connect_to_device",
+                new=AsyncMock(return_value=mock_meshcore),
+            ),
+            patch(
+                "app.api.routes.channels.telemetry_common.load_config",
+                return_value={},
+            ),
+        ):
+            response = client.post(
+                "/api/channels",
+                json={"name": "new-channel", "region": "us"},
+                headers={"x-api-token": token},
+            )
+
+        assert response.status_code == 201
+        body = response.json()
+        new_ch = next(ch for ch in body["channels"] if ch["name"] == "new-channel")
+        assert new_ch["region"] == "us"
+        mock_meshcore.commands.set_flood_scope.assert_awaited_once_with("us")
+
+    def test_create_without_region_does_not_set_scope(self):
+        """No region -> set_flood_scope is never called."""
+        mock_meshcore = self._device_mocks()
+
+        with (
+            _valid_token() as token,
+            patch(
+                "app.api.routes.channels.telemetry_common.connect_to_device",
+                new=AsyncMock(return_value=mock_meshcore),
+            ),
+            patch(
+                "app.api.routes.channels.telemetry_common.load_config",
+                return_value={},
+            ),
+        ):
+            response = client.post(
+                "/api/channels",
+                json={"name": "new-channel"},
+                headers={"x-api-token": token},
+            )
+
+        assert response.status_code == 201
+        mock_meshcore.commands.set_flood_scope.assert_not_awaited()
+
+    def test_create_normalizes_region_prefix(self):
+        """A leading '#' is stripped before being sent to the companion."""
+        mock_meshcore = self._device_mocks()
+
+        with (
+            _valid_token(region_rows=[["new-channel", "us-co"]]) as token,
+            patch(
+                "app.api.routes.channels.telemetry_common.connect_to_device",
+                new=AsyncMock(return_value=mock_meshcore),
+            ),
+            patch(
+                "app.api.routes.channels.telemetry_common.load_config",
+                return_value={},
+            ),
+        ):
+            response = client.post(
+                "/api/channels",
+                json={"name": "new-channel", "region": "#us-co"},
+                headers={"x-api-token": token},
+            )
+
+        assert response.status_code == 201
+        new_ch = next(
+            ch for ch in response.json()["channels"] if ch["name"] == "new-channel"
+        )
+        assert new_ch["region"] == "us-co"
+        mock_meshcore.commands.set_flood_scope.assert_awaited_once_with("us-co")
+
+    def test_create_invalid_region_returns_400(self):
+        """Regions must be lowercase alphanumeric plus hyphens."""
+        set_cache([{"index": 0, "name": "general", "secret_hex": "ab" * 16}])
+
+        with _valid_token() as token:
+            response = client.post(
+                "/api/channels",
+                json={"name": "new-channel", "region": "INVALID"},
+                headers={"x-api-token": token},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["status"] == "error"
+
+    def test_create_oversized_region_returns_400(self):
+        """Regions must be at most 29 bytes."""
+        set_cache([{"index": 0, "name": "general", "secret_hex": "ab" * 16}])
+
+        with _valid_token() as token:
+            response = client.post(
+                "/api/channels",
+                json={"name": "new-channel", "region": "us-" + "x" * 30},
+                headers={"x-api-token": token},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["status"] == "error"
+
+    def test_get_returns_region_from_cache(self):
+        """GET reports the region stored for each channel."""
+        set_cache(
+            [
+                {
+                    "index": 0,
+                    "name": "general",
+                    "secret_hex": "ab" * 16,
+                    "region": "us",
+                },
+                {
+                    "index": 1,
+                    "name": "ops",
+                    "secret_hex": "cd" * 16,
+                    "region": None,
+                },
+            ]
+        )
+
+        with _valid_token() as token:
+            response = client.get("/api/channels", headers={"x-api-token": token})
+
+        assert response.status_code == 200
+        channels = response.json()["channels"]
+        by_name = {ch["name"]: ch for ch in channels}
+        assert by_name["general"]["region"] == "us"
+        assert by_name["ops"]["region"] is None
 
 
 # ── Integration tests for DELETE /api/channels cache invalidation ─────────────

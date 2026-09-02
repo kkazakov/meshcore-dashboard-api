@@ -1,5 +1,5 @@
 # MeshCore
-meshcore>=2.2.5
+meshcore>=2.3.9
 
 # Web framework
 fastapi>=0.115.0

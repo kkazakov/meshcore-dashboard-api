@@ -23,6 +23,7 @@ import logging
 import time
 from typing import Any
 
+from app.db.clickhouse import get_client
 from app.meshcore import telemetry_common
 from app.meshcore.connection import device_lock
 
@@ -34,7 +35,7 @@ CACHE_TTL_SECONDS: int = 12 * 60 * 60
 # ── Cache state ───────────────────────────────────────────────────────────────
 
 # Each entry is a plain dict matching ChannelInfo fields:
-# {"index": int, "name": str, "secret_hex": str}
+# {"index": int, "name": str, "secret_hex": str, "region": str}
 _cached_channels: list[dict[str, Any]] | None = None
 _cache_populated_at: float = 0.0  # epoch seconds; 0 means never populated
 
@@ -148,8 +149,27 @@ def _is_empty_slot(name: str, secret_hex: str) -> bool:
     return not name and all(c == "0" for c in secret_hex)
 
 
+def load_channel_regions() -> dict[str, str]:
+    """
+    Best-effort ``{channel_name: region}`` map read from ``channel_config``.
+
+    Regions live in the dashboard's own ``channel_config`` table (the device
+    channel slots have no region field) so they can be returned by
+    ``GET /api/channels``.  On any database failure an empty map is returned
+    and the error is logged — regions are an enrichment, never a blocker.
+    """
+    try:
+        result = get_client().query(
+            "SELECT channel_name, region FROM channel_config FINAL WHERE region != ''"
+        )
+        return {row[0]: row[1] for row in result.result_rows}
+    except Exception as exc:
+        logger.error("Failed to load channel regions from channel_config: %s", exc)
+        return {}
+
+
 async def _fetch_all_channels(meshcore: Any) -> list[dict[str, Any]]:
-    """Iterate 0-7 slots; skip empty; stop early on ERROR."""
+    """Iterate 0-7 slots; skip empty; stop early on ERROR; attach regions."""
     # Import here to avoid a circular dependency with channels.py which also
     # imports from this module.
     from meshcore import EventType  # noqa: PLC0415
@@ -185,5 +205,9 @@ async def _fetch_all_channels(meshcore: Any) -> list[dict[str, Any]]:
                 "secret_hex": secret_hex,
             }
         )
+
+    regions = load_channel_regions()
+    for ch in channels:
+        ch["region"] = regions.get(ch["name"])
 
     return channels

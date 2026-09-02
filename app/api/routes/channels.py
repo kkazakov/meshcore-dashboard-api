@@ -19,6 +19,7 @@ Each channel entry contains:
 - ``index``        : channel slot index on the device
 - ``name``         : human-readable channel name
 - ``secret_hex``   : 16-byte channel secret encoded as a hex string
+- ``region``       : optional MeshCore region/scope the channel is scoped to
 
 Channel Types
 -------------
@@ -30,6 +31,14 @@ a channel with the same name will get the same secret.
 is derived from the password using SHA-256, ensuring only those who know the
 password can communicate on the channel.
 
+Regions
+-------
+``POST /api/channels`` accepts an optional ``region`` field. When provided, the
+region is passed to the meshcore companion client via ``set_flood_scope`` and
+stored in the ``channel_config`` table so ``GET /api/channels`` returns it.
+Region names follow the MeshCore rules: lowercase alphanumeric plus hyphens,
+at most 29 bytes.
+
 Soft Delete
 -----------
 The DELETE endpoint supports soft delete via the ``soft`` parameter. When set
@@ -40,6 +49,7 @@ re-creating the channel with the same name.
 
 import asyncio
 import logging
+import re
 from hashlib import sha256
 from typing import Any
 
@@ -52,6 +62,7 @@ from app.meshcore import telemetry_common
 from app.meshcore.channel_cache import (
     get_cached_channels,
     invalidate_cache,
+    load_channel_regions,
     populate_cache,
     set_cache,
 )
@@ -65,6 +76,11 @@ router = APIRouter()
 # Maximum number of channel slots to probe.  MeshCore firmware caps at 8.
 _MAX_CHANNEL_SLOTS = 8
 
+# MeshCore region/scope rules (see region filtering docs): max 29 UTF-8 bytes,
+# lowercase alphanumeric plus hyphens only.
+_REGION_MAX_BYTES = 29
+_REGION_PATTERN = re.compile(r"^[a-z0-9-]+$")
+
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
@@ -73,6 +89,7 @@ class ChannelInfo(BaseModel):
     index: int
     name: str
     secret_hex: str
+    region: str | None = None
 
 
 class ChannelsResponse(BaseModel):
@@ -83,6 +100,7 @@ class ChannelsResponse(BaseModel):
 class CreateChannelRequest(BaseModel):
     name: str
     password: str | None = None
+    region: str | None = None
 
 
 class DeleteChannelRequest(BaseModel):
@@ -131,7 +149,8 @@ async def _fetch_all_channels(meshcore: Any) -> list[dict[str, Any]]:
     Iterate all channel slots on the device and return initialised ones.
 
     Reads up to ``_MAX_CHANNEL_SLOTS`` indices; empty/uninitialised slots are
-    skipped.  Stops early if the device returns ERROR (no more slots).
+    skipped.  Stops early if the device returns ERROR (no more slots).  Each
+    channel is enriched with its region from ``channel_config``.
     """
     channels: list[dict[str, Any]] = []
 
@@ -165,7 +184,79 @@ async def _fetch_all_channels(meshcore: Any) -> list[dict[str, Any]]:
             }
         )
 
+    regions = load_channel_regions()
+    for ch in channels:
+        ch["region"] = regions.get(ch["name"])
+
     return channels
+
+
+def _normalize_region(region: str | None) -> str | None:
+    """
+    Validate and normalise an optional channel region/scope.
+
+    Returns ``None`` for absent or blank input.  A leading ``#`` is stripped
+    (the companion client re-adds it internally).  Raises ``HTTPException(400)``
+    for names that violate the MeshCore region rules (max 29 UTF-8 bytes,
+    lowercase alphanumeric and hyphens only).
+    """
+    if region is None:
+        return None
+
+    region = region.strip().lstrip("#")
+    if not region:
+        return None
+
+    if len(region.encode("utf-8")) > _REGION_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "error",
+                "message": (
+                    f"Region must be at most {_REGION_MAX_BYTES} bytes"
+                ),
+            },
+        )
+    if not _REGION_PATTERN.fullmatch(region):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "error",
+                "message": (
+                    "Region must contain only lowercase letters, digits and "
+                    "hyphens"
+                ),
+            },
+        )
+    return region
+
+
+async def _set_flood_scope(meshcore: Any, channel_name: str, region: str) -> None:
+    """
+    Provide the region/scope to the meshcore companion client.
+
+    Best-effort: a failed ``set_flood_scope`` is logged as an error but does
+    not fail the request — the channel itself was already written to the
+    device, and the region is still persisted for ``GET /api/channels``.
+    """
+    try:
+        result = await meshcore.commands.set_flood_scope(region)
+    except Exception as exc:
+        logger.error(
+            "set_flood_scope failed for channel '%s' region '%s': %s",
+            channel_name,
+            region,
+            exc,
+        )
+        return
+    if result is None or result.type == EventType.ERROR:
+        err_msg = result.payload if result else "no response"
+        logger.error(
+            "Device rejected flood scope for channel '%s' region '%s': %s",
+            channel_name,
+            region,
+            err_msg,
+        )
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -237,6 +328,13 @@ async def create_channel(
     derived from the password using SHA-256, ensuring only those who know the
     password can access the channel.
 
+    **Regions (Scope)**: Optionally provide a ``region`` to scope the channel
+    to a MeshCore region.  The region is provided to the companion client via
+    ``set_flood_scope`` and is stored in the ``channel_config`` table so it is
+    returned by ``GET /api/channels``.  Region names must be lowercase
+    alphanumeric plus hyphens, at most 29 bytes (a leading ``#`` is accepted
+    and stripped).
+
     **Restoring Soft-Deleted Channels**: If a channel with the same name exists
     on the device and was previously soft-deleted (marked in ``channel_config``
     table), this endpoint will restore it by setting ``deleted=false`` without
@@ -245,7 +343,7 @@ async def create_channel(
     After a successful write the channel cache is invalidated and immediately
     refreshed so that the updated list is returned in the response.
 
-    - **400** — no free slot available or empty name.
+    - **400** — no free slot available, empty name, or invalid region.
     - **409** — a channel with the same name already exists.
     - **401** — invalid or missing ``x-api-token``.
     - **502** — device connection failed.
@@ -257,6 +355,8 @@ async def create_channel(
             status_code=400,
             detail={"status": "error", "message": "Channel name must not be empty"},
         )
+
+    channel_region = _normalize_region(payload.region)
 
     # Determine channel secret based on password and name
     channel_secret: bytes | None = None
@@ -331,23 +431,35 @@ async def create_channel(
                 try:
                     client = get_client()
                     result = client.query(
-                        "SELECT deleted FROM channel_config WHERE channel_name = {name:String}",
+                        "SELECT deleted, region FROM channel_config "
+                        "WHERE channel_name = {name:String}",
                         parameters={"name": channel_name},
                     )
                     if result.result_rows and result.result_rows[0][0]:
                         # Channel was soft-deleted, restore it
+                        existing_region = result.result_rows[0][1] or ""
+                        restore_region = (
+                            channel_region if channel_region is not None else existing_region
+                        )
                         logger.info(
-                            "Restoring soft-deleted channel '%s' at slot %d",
+                            "Restoring soft-deleted channel '%s' at slot %d (region=%s)",
                             channel_name,
                             existing_idx,
+                            restore_region or "*",
                         )
                         client.command(
                             """
-                            INSERT INTO channel_config (channel_name, deleted, updated_at)
-                            VALUES ({name:String}, false, now64())
+                            INSERT INTO channel_config
+                                (channel_name, region, deleted, updated_at)
+                            VALUES ({name:String}, {region:String}, false, now64())
                             """,
-                            parameters={"name": channel_name},
+                            parameters={
+                                "name": channel_name,
+                                "region": restore_region,
+                            },
                         )
+                        if restore_region:
+                            await _set_flood_scope(meshcore, channel_name, restore_region)
                         invalidate_cache()
                         channels = await _fetch_all_channels(meshcore)
                         set_cache(channels)
@@ -407,6 +519,30 @@ async def create_channel(
                         "message": f"Device did not acknowledge channel creation: {err_msg}",
                     },
                 )
+
+            # Provide the region/scope to the companion client and persist it
+            # so GET /api/channels can report it.
+            if channel_region:
+                await _set_flood_scope(meshcore, channel_name, channel_region)
+                try:
+                    client = get_client()
+                    client.command(
+                        """
+                        INSERT INTO channel_config
+                            (channel_name, region, deleted, updated_at)
+                        VALUES ({name:String}, {region:String}, false, now64())
+                        """,
+                        parameters={
+                            "name": channel_name,
+                            "region": channel_region,
+                        },
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Failed to store region in channel_config for '%s': %s",
+                        channel_name,
+                        exc,
+                    )
 
             channels = await _fetch_all_channels(meshcore)
 
